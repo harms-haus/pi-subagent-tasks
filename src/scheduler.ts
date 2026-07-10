@@ -304,6 +304,14 @@ export function createScheduler(opts: SchedulerOptions): Scheduler {
           sessionDir: opts.sessionDir,
           poolId: opts.pool.id,
           signal: opts.signal,
+          onOutput: (text) => {
+            const liveTask = opts.pool.tasks.find((t) => t.id === task.id);
+            if (liveTask === undefined) return;
+            const lines = text.split(/\r?\n/).filter((line) => line.trim().length > 0);
+            if (lines.length === 0) return;
+            liveTask.outputLines = [...(liveTask.outputLines ?? []), ...lines].slice(-10);
+            opts.callbacks.onUpdate();
+          },
         })
         .then(
           async (r) => {

@@ -196,6 +196,7 @@ export function createRealAgentRunner(opts: RealAgentRunnerOptions): AgentRunner
         stdinPrompt: demand.effectivePrompt,
         cwd: demand.cwd,
         signal: runOpts.signal,
+        onOutput: runOpts.onOutput,
         // Track the child process in the managed set
         onSpawn(proc: ChildProcess) {
           opts.childProcesses.add(proc);

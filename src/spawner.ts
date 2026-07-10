@@ -28,6 +28,7 @@ import {
   ABORT_FORCE_MS,
 } from "./constants";
 import type { GateVerdict } from "./types";
+import { toolPreview } from "./tool-format";
 
 // ── Public interfaces ────────────────────────────────────────────────────────
 
@@ -50,6 +51,8 @@ export interface SpawnOptions {
    * Debouncing (throttling UI updates) is the caller's responsibility.
    */
   onUpdate?: () => void;
+  /** Called with each completed assistant text message. */
+  onOutput?: (text: string) => void;
   /**
    * Callback invoked after the child process is spawned, with the raw
    * {@link ChildProcess} reference. Enables the caller (e.g. agent-runner)
@@ -265,10 +268,25 @@ export function spawnAgent(opts: SpawnOptions): Promise<SpawnResult> {
       // 1. Last assistant text (message_end / turn_end)
       if (event.type === "message_end" || event.type === "turn_end") {
         const text = extractLastText(event);
-        if (text !== undefined) lastAssistantText = text;
+        if (text !== undefined) {
+          lastAssistantText = text;
+          opts.onOutput?.(text);
+        }
       }
 
-      // 2. GateLoop verdict (tool_execution_end · gate_verdict)
+      // 2. Rewrite tool calls to concise previews instead of dumping JSON args.
+      if (event.type === "tool_execution_start" && typeof event.toolName === "string") {
+        const args = event.args;
+        opts.onOutput?.(
+          toolPreview(
+            event.toolName,
+            args !== null && typeof args === "object" ? (args as Record<string, unknown>) : {},
+            opts.cwd,
+          ),
+        );
+      }
+
+      // 3. GateLoop verdict (tool_execution_end · gate_verdict)
       if (event.type === "tool_execution_end") {
         const v = extractVerdict(event);
         if (v) verdict = v;

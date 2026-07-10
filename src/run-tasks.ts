@@ -192,6 +192,7 @@ function specToTaskRuntime(
     downstreamCount,
     lastError: undefined,
     startedAt: undefined,
+    outputLines: [],
   };
 }
 

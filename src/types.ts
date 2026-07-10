@@ -191,6 +191,8 @@ export interface TaskRuntime {
   lastError?: string;
   /** Epoch ms when the task first started running. */
   startedAt?: number;
+  /** Rolling latest assistant-output lines shown in the live board. */
+  outputLines?: string[];
 }
 
 // ── Concurrency-pool usage (§7) ──────────────────────────────────────────────
@@ -264,6 +266,8 @@ export interface AgentRunOptions {
   sessionDir: string;
   /** Pool id (for audit). */
   poolId: string;
+  /** Called with the latest assistant text as it is emitted. */
+  onOutput?: (text: string) => void;
 }
 
 /** Injectable seam the scheduler uses to spawn agents (enables testing). */

@@ -8,7 +8,7 @@
  * §6.2 final summary EXACT template
  */
 
-import { Container, Spacer, Text } from "@earendil-works/pi-tui";
+import { Container, Text } from "@earendil-works/pi-tui";
 import { keyHint } from "@earendil-works/pi-coding-agent";
 import type { Theme, ThemeColor } from "@earendil-works/pi-coding-agent";
 
@@ -159,6 +159,15 @@ export function renderBoard(
       container.addChild(new Text(row));
       rowCount++;
       displayedTasks++;
+
+      // Keep active task output inline with its header, using the same compact
+      // rolling-window treatment as pi-subagents.
+      if (task.status === "running") {
+        const outputLines = task.outputLines ?? [];
+        for (const line of outputLines.slice(-10)) {
+          container.addChild(new Text(theme.fg("muted", `  ${line}`)));
+        }
+      }
     }
 
     if (reachedCap) break;
@@ -174,8 +183,8 @@ export function renderBoard(
     container.addChild(new Text(theme.fg("dim", hint)));
   }
 
-  // Footer: agent counts and merge indicator.
-  container.addChild(new Spacer(1));
+  // Footer: agent counts and merge indicator. Keep the board compact: the
+  // output window itself provides the visual grouping for active tasks.
   const footer = buildBoardFooter(poolsUsage, mergeInProgress, theme);
   container.addChild(new Text(footer));
 
