@@ -1,0 +1,28 @@
+# Dependencies
+node_modules/
+
+# Build output
+dist/
+
+# Test coverage
+coverage/
+*.lcov
+
+# Environment
+.env
+.env.*
+!.env.example
+
+# pi-task-pools runtime artifacts
+.pi/task-pools/
+
+# OS files
+.DS_Store
+Thumbs.db
+
+# Editor files
+.idea/
+.vscode/
+*.swp
+*.swo
+*~

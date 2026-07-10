@@ -1,0 +1,314 @@
+/**
+ * FIFO merge queue with a merge-helper agent for conflict resolution.
+ *
+ * Tasks are serialised through a single merge worker to avoid races on the
+ * shared pool worktree. The flow is:
+ *
+ * 1. Dirty check — auto-commit uncommitted changes.
+ * 2. Fast-forward merge into the pool worktree.
+ * 3. On success → clean up (remove worktree, delete branch, prune) → onMerged.
+ * 4. On conflict → spawn a merge-helper agent → check remaining conflicts →
+ *    resolved → success path / unresolved → mergeAbort + onFailed.
+ *
+ * @module
+ */
+
+import type { GitOps } from "./git-op";
+import type { AgentDemand, AgentRunner, AgentRunOptions, TaskRuntime } from "./types";
+import type { PoolCoordinator } from "./pools";
+import { removeTaskWorktree } from "./worktrees";
+
+// ── Options ──────────────────────────────────────────────────────────────────
+
+export interface MergeWorkerOptions {
+  /** Git operations bound to the extension API. */
+  git: GitOps;
+  /** Absolute path to the pool worktree (the merge target). */
+  poolWorktree: string;
+  /** Injectable seam for spawning agents. */
+  agentRunner: AgentRunner;
+  /** Pool sessions directory (for merge-helper agent runs). */
+  sessionDir: string;
+  /** Concurrency-pool coordinator (for merge-helper slot accounting). */
+  pools: PoolCoordinator;
+  /** Pool id (for audit events). */
+  poolId: string;
+  /** Look up a task by id from the pool's in-memory state. */
+  getTask: (taskId: string) => TaskRuntime | undefined;
+  /** Called after a successful merge and cleanup. */
+  onMerged: (taskId: string) => void;
+  /** Called when the merge could not be resolved. */
+  onFailed: (taskId: string, reason: string) => void;
+  /** Emit an audit event. */
+  audit: (type: string, payload: Record<string, unknown>) => void;
+}
+
+// ── Public API ───────────────────────────────────────────────────────────────
+
+export interface MergeWorker {
+  /** Push a task id onto the merge queue. */
+  enqueue(taskId: string): void;
+  /**
+   * Process the next item in the queue, if any. No-op when a merge is
+   * already in progress or the queue is empty. Recursively processes
+   * subsequent items after the current one completes.
+   */
+  processNext(): Promise<void>;
+  /** True when a merge is currently in-flight. */
+  getInProgress(): boolean;
+}
+
+/**
+ * Create a {@link MergeWorker} bound to the given options.
+ *
+ * Ref-mutating git operations (commitAll, mergeFF, worktreeRemove, etc.)
+ * self-serialise via the promise-chain mutex inside {@link GitOps} — no
+ * outer lock wrapper is needed.
+ */
+export function createMergeWorker(opts: MergeWorkerOptions): MergeWorker {
+  const queue: string[] = [];
+  let mergeInProgress = false;
+
+  // ── Enqueue ───────────────────────────────────────────────────────────
+
+  function enqueue(taskId: string): void {
+    queue.push(taskId);
+  }
+
+  // ── Process next ──────────────────────────────────────────────────────
+
+  async function processNext(): Promise<void> {
+    if (mergeInProgress) return;
+    if (queue.length === 0) return;
+
+    mergeInProgress = true;
+    const taskId = queue.shift() as string;
+
+    try {
+      await processOne(taskId);
+    } catch (err) {
+      const reason = err instanceof Error ? err.message : String(err);
+      opts.audit("merge_error", { taskId, reason });
+      try {
+        opts.onFailed(taskId, reason);
+      } catch (cbErr) {
+        opts.audit("merge_callback_error", {
+          taskId,
+          phase: "onFailed",
+          reason: cbErr instanceof Error ? cbErr.message : String(cbErr),
+        });
+      }
+    } finally {
+      mergeInProgress = false;
+      // Recursively process the next item in the queue. We intentionally
+      // do NOT await the recursive call — the caller's promise resolves
+      // after the current task finishes, and the next one starts on a fresh
+      // microtask (via setTimeout) to avoid stack buildup on long queues.
+      if (queue.length > 0) {
+        setTimeout(() => {
+          processNext().catch(() => {
+            /* errors logged inside processNext or processOne */
+          });
+        }, 0);
+      }
+    }
+  }
+
+  // ── In-progress check ─────────────────────────────────────────────────
+
+  function getInProgress(): boolean {
+    return mergeInProgress;
+  }
+
+  // ── Internal: process one task ────────────────────────────────────────
+
+  /**
+   * Run the full merge pipeline for a single task.
+   *
+   * Ref-mutating ops (commitAll, mergeFF, etc.) each self-serialise via
+   * the promise-chain mutex inside {@link GitOps}, so no outer lock is
+   * needed.
+   *
+   * Steps:
+   *   1. Look up the task; guard against missing task/worktree/branch.
+   *   2. Dirty worktree → auto-commit.
+   *   3. FF-merge the task branch into the pool worktree.
+   *   4. FF success → clean up worktree + branch, onMerged.
+   *   5. FF fail:
+   *      a. No conflicts → mergeAbort + onFailed (diverged, not conflict).
+   *      b. Conflicts → spawn merge-helper agent, check outcome.
+   */
+  async function processOne(taskId: string): Promise<void> {
+    const task = opts.getTask(taskId);
+    if (!task) {
+      opts.audit("merge_skipped", { taskId, reason: "task not found" });
+      return;
+    }
+    const worktreePath = task.worktreePath;
+    const branch = task.branch;
+    if (!worktreePath || !branch) {
+      opts.audit("merge_skipped", { taskId, reason: "no worktree or branch" });
+      return;
+    }
+
+    // ── Step 2: dirty check ─────────────────────────────────────────────
+    const status = await opts.git.statusPorcelain(worktreePath);
+    if (status.trim().length > 0) {
+      await opts.git.commitAll("WIP: auto-commit before merge", worktreePath);
+    }
+
+    // ── Step 3: FF merge ────────────────────────────────────────────────
+    const ffResult = await opts.git.mergeFF(branch, opts.poolWorktree);
+
+    // ── Step 4: FF succeeded ────────────────────────────────────────────
+    if (ffResult.code === 0) {
+      await handleFfSuccess(taskId, worktreePath, branch);
+      return;
+    }
+
+    // ── Step 5: FF failed — check for conflicts ─────────────────────────
+    await handleMergeConflict(taskId, task, worktreePath, branch);
+  }
+
+  /**
+   * Handle a successful fast-forward merge: audit, remove worktree, and
+   * notify the caller.
+   *
+   * NOTE: `merge --ff-only` already updated HEAD to the merged commit, so
+   * we do NOT call checkoutIn/revParseHead — that would detach HEAD and
+   * break subsequent merges.
+   */
+  async function handleFfSuccess(
+    taskId: string,
+    worktreePath: string,
+    branch: string,
+  ): Promise<void> {
+    opts.audit("worktree_merged", { taskId });
+
+    await removeTaskWorktree(opts.git, worktreePath, branch, opts.poolWorktree);
+    opts.audit("worktree_deleted", { taskId });
+
+    try {
+      opts.onMerged(taskId);
+    } catch (err) {
+      opts.audit("merge_callback_error", {
+        taskId,
+        phase: "onMerged",
+        reason: err instanceof Error ? err.message : String(err),
+      });
+    }
+  }
+
+  /**
+   * Handle a merge conflict: check for files with unmerged conflicts, spawn
+   * a merge-helper agent, then check whether conflicts remain.
+   *
+   * Pool slot accounting is best-effort: the merge-helper runs regardless,
+   * but we acquire a slot if one is available and release it after.
+   *
+   * Edge case — if `mergeFF` fails but there are no conflicting files (e.g.
+   * branches have diverged without overlapping changes), we abort the merge
+   * immediately and report failure rather than spawning a helper with
+   * nothing to resolve.
+   */
+  async function handleMergeConflict(
+    taskId: string,
+    task: TaskRuntime,
+    worktreePath: string,
+    branch: string,
+  ): Promise<void> {
+    opts.audit("merge_conflict", { taskId });
+
+    const conflictFiles = await opts.git.conflictedFiles(opts.poolWorktree);
+
+    // Guard: FF failed without any true conflicts (e.g. diverged branches).
+    // Don't spawn a helper — there's nothing to resolve.
+    if (conflictFiles.length === 0) {
+      await opts.git.mergeAbort(opts.poolWorktree);
+      opts.audit("merge_failed", { taskId, reason: "FF failed without conflicts" });
+      try {
+        opts.onFailed(taskId, "FF failed without conflicts");
+      } catch (err) {
+        opts.audit("merge_callback_error", {
+          taskId,
+          phase: "onFailed",
+          reason: err instanceof Error ? err.message : String(err),
+        });
+      }
+      return;
+    }
+
+    // Acquire a pool slot (best-effort). The merge-helper runs even if the
+    // pool is full because conflict resolution is on the critical path.
+    const acquired = opts.pools.tryAcquire(undefined, undefined);
+
+    const demand: AgentDemand = {
+      atomPath: `merge-${taskId}`,
+      profileName: "merge-helper",
+      effectivePrompt: buildMergeHelperPrompt(task, conflictFiles),
+      cwd: opts.poolWorktree,
+      taskId,
+    };
+
+    const runOpts: AgentRunOptions = {
+      sessionDir: opts.sessionDir,
+      poolId: opts.poolId,
+    };
+
+    try {
+      try {
+        await opts.agentRunner.runAgent(demand, runOpts);
+      } finally {
+        if (acquired) {
+          opts.pools.release(undefined, undefined);
+        }
+      }
+
+      // Check whether conflicts were resolved.
+      const remainingConflicts = await opts.git.conflictedFiles(opts.poolWorktree);
+      if (remainingConflicts.length === 0) {
+        opts.audit("merge_resolved", { taskId });
+        await handleFfSuccess(taskId, worktreePath, branch);
+      } else {
+        await opts.git.mergeAbort(opts.poolWorktree);
+        opts.audit("merge_failed", { taskId });
+        try {
+          opts.onFailed(taskId, "merge-helper could not resolve conflicts");
+        } catch (err) {
+          opts.audit("merge_callback_error", {
+            taskId,
+            phase: "onFailed",
+            reason: err instanceof Error ? err.message : String(err),
+          });
+        }
+      }
+    } catch (err) {
+      // Ensure mergeAbort is called even if agentRunner.runAgent throws or
+      // the post-flight check fails, so the pool worktree isn't left with
+      // MERGE_HEAD.
+      await opts.git.mergeAbort(opts.poolWorktree).catch(() => {});
+      throw err;
+    }
+  }
+
+  return { enqueue, processNext, getInProgress };
+}
+
+// ── Prompt builder ──────────────────────────────────────────────────────────
+
+/**
+ * Build the effective prompt for the merge-helper agent.
+ *
+ * The prompt communicates the task goal and the list of conflicted files so
+ * the agent understands the context of the merge.
+ */
+function buildMergeHelperPrompt(task: TaskRuntime, conflictFiles: string[]): string {
+  return [
+    `Task goal: ${task.prompt}`,
+    "",
+    "Conflicted files:",
+    ...conflictFiles.map((f) => `  ${f}`),
+    "",
+    "Resolve the merge conflicts, stage, and commit.",
+  ].join("\n");
+}
