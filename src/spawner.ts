@@ -17,6 +17,7 @@
 
 import { spawn, type ChildProcess } from "node:child_process";
 import { StringDecoder } from "node:string_decoder";
+import { existsSync } from "node:fs";
 import kill from "tree-kill";
 import {
   LOOP_DETECT_COUNT,
@@ -401,9 +402,15 @@ export function spawnAgent(opts: SpawnOptions): Promise<SpawnResult> {
     });
 
     proc.on("error", (err: Error) => {
+      // Node reports ENOENT using only the executable name even when the
+      // actual cause is a missing/inaccessible `cwd`. Include the cwd and
+      // executable diagnostics so worktree launch failures are actionable.
+      const cwdDiagnostic = opts.cwd
+        ? ` (cwd: ${opts.cwd}; cwdExists: ${existsSync(opts.cwd)})`
+        : "";
       safeResolve({
         exitCode: -1,
-        stderr: err.message,
+        stderr: `${err.message}${cwdDiagnostic}`,
         lastAssistantText: "",
         verdict: undefined,
         loopDetected: false,

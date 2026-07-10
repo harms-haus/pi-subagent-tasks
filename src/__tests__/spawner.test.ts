@@ -410,7 +410,8 @@ describe("spawnAgent", () => {
 
     const result = await promise;
     expect(result.exitCode).toBe(-1);
-    expect(result.stderr).toBe("spawn pi ENOENT");
+    expect(result.stderr).toContain("spawn pi ENOENT");
+    expect(result.stderr).toContain("cwd: /tmp/workdir");
     expect(result.lastAssistantText).toBe("");
     expect(result.loopDetected).toBe(false);
   });
