@@ -18,7 +18,7 @@ import { describe, it, expect, vi, beforeEach, afterEach } from "vitest";
 import { EventEmitter } from "node:events";
 import type { ChildProcess } from "node:child_process";
 import { tmpdir } from "node:os";
-import { writeFileSync, rmSync } from "node:fs";
+import { writeFileSync, symlinkSync, rmSync, mkdirSync } from "node:fs";
 import { join } from "node:path";
 
 import type { SpawnResult } from "../spawner";
@@ -715,6 +715,25 @@ describe("resolvePiBinary", () => {
 
     expect(resolvePiBinary()).toEqual({ command: "/usr/local/bin/pi", argsPrefix: [] });
     expect(mockExecSync).toHaveBeenCalledWith("which pi", expect.anything());
+  });
+
+  it("runs an npm pi shim through Node instead of relying on its shebang", () => {
+    const dir = join(tmpdir(), `pi-shim-${Date.now()}`);
+    const target = join(dir, "cli.js");
+    const shim = join(dir, "pi");
+    mkdirSync(dir, { recursive: true });
+    writeFileSync(target, "#!/usr/bin/env node\nconsole.log('ok');\n");
+    symlinkSync(target, shim);
+    mockExecSync.mockImplementation(() => `${shim}\n`);
+
+    try {
+      expect(resolvePiBinary()).toEqual({
+        command: process.execPath,
+        argsPrefix: [target],
+      });
+    } finally {
+      rmSync(dir, { recursive: true, force: true });
+    }
   });
 
   it("falls back to node <argv[1]> when pi is off PATH and argv[1] is a real path", () => {

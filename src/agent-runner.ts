@@ -21,7 +21,7 @@
  */
 
 import { execSync, type ChildProcess } from "node:child_process";
-import { existsSync } from "node:fs";
+import { existsSync, readFileSync, realpathSync } from "node:fs";
 import type { ExtensionAPI } from "@earendil-works/pi-coding-agent";
 
 import { spawnAgent } from "./spawner";
@@ -61,6 +61,30 @@ function whichPi(): string | null {
 }
 
 /**
+ * Avoid executing an npm-generated `#!/usr/bin/env node` shim directly.
+ *
+ * `spawn()` executes the shebang in the kernel, which makes the result depend
+ * on the child's PATH (and on the visibility of the interpreter in a sandbox).
+ * The pi CLI installed by npm is such a shim, often reached through a
+ * symlink.  Running its real script with the current Node executable removes
+ * both sources of ambiguity while leaving native binaries and shell wrappers
+ * untouched.
+ */
+function nodeScriptTarget(candidate: string): ResolvedBinary | null {
+  try {
+    const resolved = realpathSync(candidate);
+    const firstLine = readFileSync(resolved, "utf8").slice(0, 256).split("\n", 1)[0] ?? "";
+    const isNodeScript =
+      /\.(?:cjs|js|mjs)$/i.test(resolved) || /^#!.*\bnode(?:\s|$)/.test(firstLine);
+    return isNodeScript ? { command: process.execPath, argsPrefix: [resolved] } : null;
+  } catch {
+    // The override may intentionally name a command on PATH, and `which`
+    // may have returned a path that disappears between lookup and spawn.
+    return null;
+  }
+}
+
+/**
  * Deterministically resolve the pi binary to spawn, using this preference
  * order:
  *
@@ -76,13 +100,14 @@ export function resolvePiBinary(): ResolvedBinary {
   // 1. Explicit env override
   const override = process.env.PI_TASK_POOLS_PI_BIN ?? process.env.PI_BIN;
   if (override) {
-    return { command: override, argsPrefix: [] };
+    return nodeScriptTarget(override) ?? { command: override, argsPrefix: [] };
   }
 
-  // 2. `pi` on PATH
+  // 2. `pi` on PATH. Prefer invoking a script through Node when the PATH
+  // entry is an npm shim (including a symlink to the real cli.js file).
   const onPath = whichPi();
   if (onPath) {
-    return { command: onPath, argsPrefix: [] };
+    return nodeScriptTarget(onPath) ?? { command: onPath, argsPrefix: [] };
   }
 
   // 3. node <argv[1]> heuristic — only when argv[1] is a real fs path
