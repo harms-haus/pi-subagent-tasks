@@ -19,6 +19,7 @@ import {
   existsSync,
   mkdtempSync,
   readdirSync,
+  readFileSync,
   rmSync,
   statSync,
   writeFileSync,
@@ -130,9 +131,7 @@ function createMockGitOps(): GitOps & { gitExec: ReturnType<typeof vi.fn> } {
     statusPorcelain: vi.fn().mockResolvedValue(""),
     conflictedFiles: vi.fn().mockResolvedValue([]),
     worktreeList: vi.fn().mockResolvedValue([]),
-    lsFiles: vi.fn().mockResolvedValue([]),
     revParseHead: vi.fn().mockResolvedValue("abc123def456abc123def456"),
-    symbolicRefHead: vi.fn().mockResolvedValue("refs/heads/main"),
     worktreeAdd: vi.fn().mockResolvedValue({
       stdout: "",
       stderr: "",
@@ -170,12 +169,6 @@ function createMockGitOps(): GitOps & { gitExec: ReturnType<typeof vi.fn> } {
       killed: false,
     }),
     commitAll: vi.fn().mockResolvedValue({
-      stdout: "",
-      stderr: "",
-      code: 0,
-      killed: false,
-    }),
-    checkoutIn: vi.fn().mockResolvedValue({
       stdout: "",
       stderr: "",
       code: 0,
@@ -378,6 +371,21 @@ describe("integration tests (compose engine e2e)", () => {
     // tests and code are skipped due to transitive dependency failure
     expect(text).toContain("⊘ tests");
     expect(text).toContain("⊘ code");
+
+    // N6 (§15): task_skipped audit events emitted for propagated tasks
+    // so the audit log can distinguish a genuine failure from a transitive
+    // skip. Read audit.jsonl and verify the events were written.
+    const auditPath = join(cwd, ".pi", "task-pools", "failure-prop", "audit.jsonl");
+    const auditContent = readFileSync(auditPath, "utf-8");
+    const auditLines = auditContent
+      .trim()
+      .split("\n")
+      .map((l) => JSON.parse(l) as Record<string, unknown>);
+    const skippedIds = auditLines.filter((e) => e.type === "task_skipped").map((e) => e.taskId);
+    expect(skippedIds).toContain("tests");
+    expect(skippedIds).toContain("code");
+    // plan was genuinely failed, not skipped.
+    expect(skippedIds).not.toContain("plan");
   });
 
   // ── Test 3: gateLoop ────────────────────────────────────────────────────
@@ -672,6 +680,78 @@ describe("integration tests (compose engine e2e)", () => {
     expect(text2).toContain("2 done");
     expect(text2).toContain("✓ a");
     expect(text2).toContain("✓ b");
+  });
+
+  // ── Test 7: Resume after an abort in the merge window (N2a) ─────────────
+
+  it("resumes a pool that was aborted mid-merge without hanging", async () => {
+    const pi = createMockAPI();
+    const opts = createToolOpts({ gitOps });
+    const tool = createRunTasksTool(pi, opts);
+
+    // Step 1: Create and complete a single-task pool.
+    const result1 = await tool.execute(
+      "int-7a",
+      {
+        name: "Mid Merge",
+        tasks: [{ id: "solo", prompt: "Task solo" }],
+      },
+      undefined,
+      undefined,
+      ctx,
+    );
+
+    const text1 = contentText(result1);
+    expect(text1).toContain("1 done");
+
+    // Verify state.json exists on disk.
+    const stateFile = join(cwd, ".pi", "task-pools", "mid-merge", "state.json");
+    expect(existsSync(stateFile)).toBe(true);
+
+    // Step 2: Simulate an abort in the merge window. Read the persisted
+    // state and mutate it so the task looks like its atoms completed but
+    // the merge never marked it done:
+    //   - cursor stays structurally complete (state: "done")
+    //   - status rewound to "running"
+    //   - worktreePath set to null (worktree already removed by a
+    //     successful merge+cleanup, but persisted status lagged)
+    //   - mergeQueue cleared
+    // This is exactly the N2a window: isComposeComplete(cursor) === true
+    // but status !== "done".
+    const rawState = JSON.parse(readFileSync(stateFile, "utf-8")) as PoolState;
+    const soloTask = rawState.tasks.find((t) => t.id === "solo");
+    expect(soloTask).toBeDefined();
+    expect(soloTask!.cursor.state).toBe("done");
+    soloTask!.status = "running";
+    soloTask!.worktreePath = null;
+    rawState.mergeQueue = [];
+    writeFileSync(stateFile, JSON.stringify(rawState, null, 2), "utf-8");
+
+    // Step 3: Resume with a fresh tool instance. The N2a reconciliation in
+    // run-tasks.ts should detect the completed-but-unmerged task (worktree
+    // already gone) and set it straight to "done" so the pool reaches a
+    // fixed point instead of hanging.
+    const freshPi = createMockAPI();
+    const freshOpts = createToolOpts({ gitOps });
+    const freshTool = createRunTasksTool(freshPi, freshOpts);
+
+    // Race the resume against a timeout so a regression (missing
+    // reconciliation) turns into a test failure, not a hung suite.
+    const result2 = await Promise.race([
+      freshTool.execute("int-7b", { resume: "mid-merge" }, undefined, undefined, ctx),
+      new Promise<never>((_, reject) =>
+        setTimeout(() => {
+          reject(new Error("resume after mid-merge abort timed out (N2a hang)"));
+        }, 15_000),
+      ),
+    ]);
+
+    const text2 = contentText(result2);
+    expect(text2).toContain("Pool: Mid Merge");
+    // The task reconciled back to done — the pool completes.
+    expect(text2).toContain("1 done");
+    expect(text2).toContain("✓ solo");
+    expect(text2).not.toContain("0 done");
   });
 });
 

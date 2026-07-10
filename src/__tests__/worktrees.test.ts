@@ -46,9 +46,7 @@ function createMockGitOps(): GitOps {
       .mockResolvedValue([
         { path: "/repo", head: "aaa", branch: "refs/heads/main", branchName: "main" },
       ]),
-    lsFiles: vi.fn().mockResolvedValue([]),
     revParseHead: vi.fn().mockResolvedValue("abc123"),
-    symbolicRefHead: vi.fn().mockResolvedValue("refs/heads/main"),
     worktreeAdd: vi.fn().mockResolvedValue({ stdout: "", stderr: "", code: 0, killed: false }),
     worktreeRemove: vi.fn().mockResolvedValue({ stdout: "", stderr: "", code: 0, killed: false }),
     worktreePrune: vi.fn().mockResolvedValue({ stdout: "", stderr: "", code: 0, killed: false }),
@@ -56,7 +54,6 @@ function createMockGitOps(): GitOps {
     mergeFF: vi.fn().mockResolvedValue({ stdout: "", stderr: "", code: 0, killed: false }),
     mergeAbort: vi.fn().mockResolvedValue({ stdout: "", stderr: "", code: 0, killed: false }),
     commitAll: vi.fn().mockResolvedValue({ stdout: "", stderr: "", code: 0, killed: false }),
-    checkoutIn: vi.fn().mockResolvedValue({ stdout: "", stderr: "", code: 0, killed: false }),
   };
 }
 

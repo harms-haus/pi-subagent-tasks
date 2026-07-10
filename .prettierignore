@@ -2,6 +2,3 @@
 coverage/
 dist/
 *.lcov
-
-# Pre-existing build spec — reference artifact, not extension source
-TASK-POOLS-EXTENSION-PROMPT.md

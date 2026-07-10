@@ -68,14 +68,8 @@ export interface GitOps {
   /** Parsed `git worktree list --porcelain`. */
   worktreeList(cwd?: string): Promise<WorktreeInfo[]>;
 
-  /** `git ls-files` output split by newline. */
-  lsFiles(cwd?: string): Promise<string[]>;
-
   /** `git rev-parse HEAD` (trimmed). */
   revParseHead(cwd?: string): Promise<string>;
-
-  /** `git symbolic-ref HEAD` (trimmed). */
-  symbolicRefHead(cwd?: string): Promise<string>;
 
   // ── Ref-mutating (under mutex) ─────────────────────────────────────────
 
@@ -107,9 +101,6 @@ export interface GitOps {
 
   /** Stage all changes and commit (`add -A` + `commit -m`). */
   commitAll(message: string, cwd?: string): Promise<ExecResult>;
-
-  /** Checkout a specific SHA inside an existing worktree. */
-  checkoutIn(worktree: string, sha: string): Promise<ExecResult>;
 }
 
 // ── Helpers ──────────────────────────────────────────────────────────────────
@@ -181,23 +172,8 @@ export function createGitOps(pi: ExtensionAPI): GitOps {
       .then((r) => parseWorktreePorcelain(r.stdout));
   }
 
-  function lsFiles(cwd?: string): Promise<string[]> {
-    return gitExec(["ls-files"], cwd)
-      .then(checkCode)
-      .then((r) => {
-        const trimmed = r.stdout.trim();
-        return trimmed.length > 0 ? trimmed.split("\n") : [];
-      });
-  }
-
   function revParseHead(cwd?: string): Promise<string> {
     return gitExec(["rev-parse", "HEAD"], cwd)
-      .then(checkCode)
-      .then((r) => r.stdout.trim());
-  }
-
-  function symbolicRefHead(cwd?: string): Promise<string> {
-    return gitExec(["symbolic-ref", "HEAD"], cwd)
       .then(checkCode)
       .then((r) => r.stdout.trim());
   }
@@ -266,10 +242,6 @@ export function createGitOps(pi: ExtensionAPI): GitOps {
     });
   }
 
-  function checkoutIn(worktree: string, sha: string): Promise<ExecResult> {
-    return lock(() => gitExec(["checkout", sha], worktree));
-  }
-
   // ── Assemble ───────────────────────────────────────────────────────────
 
   return {
@@ -278,9 +250,7 @@ export function createGitOps(pi: ExtensionAPI): GitOps {
     statusPorcelain,
     conflictedFiles,
     worktreeList,
-    lsFiles,
     revParseHead,
-    symbolicRefHead,
     worktreeAdd,
     worktreeRemove,
     worktreePrune,
@@ -288,7 +258,6 @@ export function createGitOps(pi: ExtensionAPI): GitOps {
     mergeFF,
     mergeAbort,
     commitAll,
-    checkoutIn,
   };
 }
 

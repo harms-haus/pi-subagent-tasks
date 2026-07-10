@@ -71,6 +71,13 @@ export interface SpawnResult {
   loopDetected: boolean;
   /** Wall-clock duration of the agent run in milliseconds. */
   durationMs: number;
+  /**
+   * Session id captured from the `type:"session"` header (the first JSON
+   * line emitted by pi). Used to deterministically locate the session file
+   * after the run completes (§11), avoiding the racy "globally newest"
+   * heuristic that misattributes files under concurrency.
+   */
+  sessionId?: string;
 }
 
 // ── Internal helpers ─────────────────────────────────────────────────────────
@@ -190,6 +197,7 @@ export function spawnAgent(opts: SpawnOptions): Promise<SpawnResult> {
   let verdict: GateVerdict | undefined;
   let loopDetected = false;
   let storedExitCode: number | null = null;
+  let sessionId: string | undefined;
   const recentSignatures: string[] = [];
   let lastActivityAt = Date.now();
   let resolved = false;
@@ -235,6 +243,7 @@ export function spawnAgent(opts: SpawnOptions): Promise<SpawnResult> {
             verdict,
             loopDetected,
             durationMs,
+            sessionId,
           });
         }, ABORT_FORCE_MS);
       }, ABORT_GRACE_MS);
@@ -242,6 +251,16 @@ export function spawnAgent(opts: SpawnOptions): Promise<SpawnResult> {
 
     // ── Unified event handler (DRY fix #4) ──────────────────────────────
     function handleEvent(event: Record<string, unknown>): void {
+      // 0. Session id — the `session` header is the first JSON line pi emits
+      //    (§11, docs/json.md: {"type":"session","version":3,"id":"<uuid>",...}).
+      //    Capture it once so the caller can locate the session file by id.
+      if (event.type === "session" && sessionId === undefined) {
+        const id = event.id;
+        if (typeof id === "string" && id.length > 0) {
+          sessionId = id;
+        }
+      }
+
       // 1. Last assistant text (message_end / turn_end)
       if (event.type === "message_end" || event.type === "turn_end") {
         const text = extractLastText(event);
@@ -377,6 +396,7 @@ export function spawnAgent(opts: SpawnOptions): Promise<SpawnResult> {
         verdict,
         loopDetected,
         durationMs: Date.now() - start,
+        sessionId,
       });
     });
 
@@ -388,6 +408,7 @@ export function spawnAgent(opts: SpawnOptions): Promise<SpawnResult> {
         verdict: undefined,
         loopDetected: false,
         durationMs: Date.now() - start,
+        sessionId,
       });
     });
   });

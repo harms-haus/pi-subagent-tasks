@@ -4,7 +4,7 @@ import { join } from "node:path";
 import { tmpdir } from "node:os";
 
 import {
-  findSessionFile,
+  findSessionFileById,
   renameSession,
   buildSpawnSessionArgs,
   recordSessionPath,
@@ -120,95 +120,157 @@ function makePoolState(tasks: TaskRuntime[]): PoolState {
   };
 }
 
-// ── findSessionFile ──────────────────────────────────────────────────────────
+// ── findSessionFileById ─────────────────────────────────────────────────────
 
-describe("findSessionFile", () => {
-  it("returns the NEWEST flat <ts>_<uuid>.jsonl when several exist", () => {
+describe("findSessionFileById", () => {
+  it("finds the flat <ts>_<sessionId>.jsonl matching the id", () => {
     const dir = makeTempDir();
 
-    // Create three flat sessions with descending mtime
-    const oldest = createFlatSession(dir, "20260709T100000Z", "aaaaaaaa", 100_000);
-    const middle = createFlatSession(dir, "20260709T110000Z", "bbbbbbbb", 200_000);
-    const newest = createFlatSession(dir, "20260709T120000Z", "cccccccc", 300_000);
+    const target = createFlatSession(dir, "20260709T120000Z", "abc12345", 100_000);
+    // Distractor with a different id
+    createFlatSession(dir, "20260709T110000Z", "zzz99999", 200_000);
 
-    const found = findSessionFile(dir);
-    expect(found).toBe(newest);
-    // Sanity: path is absolute
-    expect(found).toMatch(/^\//);
+    const found = findSessionFileById(dir, "abc12345");
+    expect(found).toBe(target);
+  });
 
-    // Files themselves still exist
-    expect(existsSync(oldest)).toBe(true);
-    expect(existsSync(middle)).toBe(true);
-    expect(existsSync(newest)).toBe(true);
+  it("finds the correct file regardless of mtime ordering (not globally-newest)", () => {
+    const dir = makeTempDir();
+
+    // The target has an OLDER mtime than the distractor, yet must still be
+    // found because the lookup is by id — not by newest mtime (N1).
+    const target = createFlatSession(dir, "20260709T100000Z", "target-id", 100_000);
+    createFlatSession(dir, "20260709T120000Z", "newer-id", 300_000);
+
+    const found = findSessionFileById(dir, "target-id");
+    expect(found).toBe(target);
   });
 
   it("ignores non-session .jsonl files (without timestamp prefix)", () => {
     const dir = makeTempDir();
-    // A plain .jsonl that doesn't match the pattern
     touch(join(dir, "random.jsonl"));
     setMtime(join(dir, "random.jsonl"), 500_000);
 
-    // A real session file
     const session = createFlatSession(dir, "20260709T120000Z", "dddddddd", 100_000);
 
-    const found = findSessionFile(dir);
+    const found = findSessionFileById(dir, "dddddddd");
     expect(found).toBe(session);
   });
 
-  it("falls back to a nested --<cwd>--/<ts>_<uuid>.jsonl when no flat file exists", () => {
+  it("finds a nested --<cwd>--/<ts>_<sessionId>.jsonl by id", () => {
     const dir = makeTempDir();
-    // Only a nested session, no flat files
     const nested = createNestedSession(dir, "my-repo", "20260709T120000Z", "eeeeeeee", 300_000);
 
-    const found = findSessionFile(dir);
+    const found = findSessionFileById(dir, "eeeeeeee");
     expect(found).toBe(nested);
   });
 
-  it("returns the newest nested session among multiple --<cwd>-- subdirs", () => {
+  it("finds the correct nested file among multiple --<cwd>-- subdirs", () => {
     const dir = makeTempDir();
     createNestedSession(dir, "repo-a", "20260709T100000Z", "ffffffff", 100_000);
-    const newerNested = createNestedSession(dir, "repo-b", "20260709T120000Z", "gggggggg", 300_000);
+    const target = createNestedSession(dir, "repo-b", "20260709T120000Z", "gggggggg", 300_000);
 
-    const found = findSessionFile(dir);
-    expect(found).toBe(newerNested);
+    const found = findSessionFileById(dir, "gggggggg");
+    expect(found).toBe(target);
   });
 
-  it("prefers flat sessions over nested when both exist", () => {
+  it("returns undefined when no file matches the id", () => {
     const dir = makeTempDir();
-    // Flat session (older mtime)
-    const flat = createFlatSession(dir, "20260709T090000Z", "hhhhhhhh", 50_000);
-    // Nested session (newer mtime but flat takes precedence)
-    createNestedSession(dir, "my-repo", "20260709T120000Z", "iiiiiiii", 300_000);
+    createFlatSession(dir, "20260709T120000Z", "aaaaaaaa", 100_000);
 
-    const found = findSessionFile(dir);
-    expect(found).toBe(flat);
+    expect(findSessionFileById(dir, "nonexistent")).toBeUndefined();
   });
 
   it("returns undefined on an empty directory", () => {
     const dir = makeTempDir();
-    expect(findSessionFile(dir)).toBeUndefined();
+    expect(findSessionFileById(dir, "some-id")).toBeUndefined();
   });
 
   it("returns undefined when the directory does not exist", () => {
-    const result = findSessionFile("/nonexistent/path/that/does/not/exist");
+    const result = findSessionFileById("/nonexistent/path/that/does/not/exist", "some-id");
     expect(result).toBeUndefined();
   });
 
-  it("returns undefined when only non-session files exist", () => {
+  it("returns undefined when only non-matching files exist", () => {
     const dir = makeTempDir();
+    createFlatSession(dir, "20260709T120000Z", "other-id", 100_000);
     touch(join(dir, "notes.txt"));
-    touch(join(dir, "data.csv"));
-    touch(join(dir, "build.log"));
-    expect(findSessionFile(dir)).toBeUndefined();
+    expect(findSessionFileById(dir, "target-id")).toBeUndefined();
   });
 
-  it("returns undefined when nested subdir has no .jsonl files", () => {
+  it("returns undefined when nested subdir has no matching file", () => {
     const dir = makeTempDir();
     const sub = join(dir, "--empty-cwd--");
     mkdirSync(sub, { recursive: true });
     touch(join(sub, "some.txt"));
-    touch(join(sub, "other.csv"));
-    expect(findSessionFile(dir)).toBeUndefined();
+    expect(findSessionFileById(dir, "target-id")).toBeUndefined();
+  });
+
+  // ── Concurrency safety (N1 regression test) ─────────────────────────
+
+  it("attributes each agent its own file under concurrency (two flat files)", () => {
+    // Simulates the N1 scenario: two agents finish concurrently, each with
+    // a distinct session id in the same sessionDir. The old globally-newest
+    // heuristic would hand both agents the same (newest) file; the id-based
+    // lookup must return each agent its own.
+    const dir = makeTempDir();
+
+    const fileA = createFlatSession(dir, "20260709T120000Z", "agentA-id", 300_000);
+    const fileB = createFlatSession(dir, "20260709T120001Z", "agentB-id", 200_000);
+
+    // Agent A (newer mtime) and Agent B (older mtime) each get their own.
+    const foundA = findSessionFileById(dir, "agentA-id");
+    const foundB = findSessionFileById(dir, "agentB-id");
+
+    expect(foundA).toBe(fileA);
+    expect(foundB).toBe(fileB);
+    expect(foundA).not.toBe(foundB);
+  });
+
+  it("attributes each agent its own file under concurrency (nested subdirs)", () => {
+    // Two concurrent tasks have different worktrees → different --<cwd>--
+    // nested dirs. The old heuristic returned the newest across both;
+    // the id-based lookup must be correct per-task.
+    const dir = makeTempDir();
+
+    const fileA = createNestedSession(dir, "worktree-a", "20260709T120000Z", "taskA-id", 300_000);
+    const fileB = createNestedSession(dir, "worktree-b", "20260709T120001Z", "taskB-id", 200_000);
+
+    const foundA = findSessionFileById(dir, "taskA-id");
+    const foundB = findSessionFileById(dir, "taskB-id");
+
+    expect(foundA).toBe(fileA);
+    expect(foundB).toBe(fileB);
+    expect(foundA).not.toBe(foundB);
+  });
+
+  it("end-to-end: two concurrent runs each rename their own file", () => {
+    // Full N1 regression: two mock-finishers go through the real
+    // findSessionFileById → renameSession path and each ends up with its
+    // own correctly-named file.
+    const dir = makeTempDir();
+
+    // Agent A and B finish "concurrently" — both raw files exist at once.
+    const rawA = createFlatSession(dir, "20260709T120000Z", "concurA", 300_000);
+    const rawB = createFlatSession(dir, "20260709T120001Z", "concurB", 200_000);
+
+    // Each agent looks up its file by id and renames it.
+    const foundA = findSessionFileById(dir, "concurA");
+    const foundB = findSessionFileById(dir, "concurB");
+    expect(foundA).toBeDefined();
+    expect(foundB).toBeDefined();
+
+    const renamedA = renameSession(foundA!, dir, "task-A");
+    const renamedB = renameSession(foundB!, dir, "task-B");
+
+    // Both renamed files exist and are distinct.
+    expect(existsSync(renamedA)).toBe(true);
+    expect(existsSync(renamedB)).toBe(true);
+    expect(renamedA).not.toBe(renamedB);
+
+    // Raw files are gone (moved, not copied).
+    expect(existsSync(rawA)).toBe(false);
+    expect(existsSync(rawB)).toBe(false);
   });
 });
 

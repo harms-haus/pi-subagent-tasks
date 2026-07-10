@@ -718,7 +718,6 @@ describe("compose scheduler integration", () => {
     // should run initially (1 per task if they both get slots, or 2 from
     // one task if the other loses the priority race).
     // The important invariant: NO deadlock, and all complete.
-    expect(scheduler.getInFlightCount()).toBe(2);
 
     // Both tasks should be running (each has at least 1 child running)
     expect(taskA.status === "running" || taskA.status === "ready").toBe(true);

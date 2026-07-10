@@ -269,35 +269,6 @@ describe("read-only operations", () => {
     expect(exec).toHaveBeenCalledWith("git", ["worktree", "list", "--porcelain"], { cwd: "/repo" });
   });
 
-  it("lsFiles splits output by newline", async () => {
-    const { gitOps, exec } = createFixture();
-    exec.mockResolvedValue({
-      stdout: "src/index.ts\nsrc/utils.ts\n",
-      stderr: "",
-      code: 0,
-      killed: false,
-    });
-
-    const files = await gitOps.lsFiles("/repo");
-    expect(files).toEqual(["src/index.ts", "src/utils.ts"]);
-    expect(exec).toHaveBeenCalledWith("git", ["ls-files"], {
-      cwd: "/repo",
-    });
-  });
-
-  it("lsFiles returns empty array for empty repo", async () => {
-    const { gitOps, exec } = createFixture();
-    exec.mockResolvedValue({
-      stdout: "",
-      stderr: "",
-      code: 0,
-      killed: false,
-    });
-
-    const files = await gitOps.lsFiles();
-    expect(files).toEqual([]);
-  });
-
   it("revParseHead returns trimmed SHA", async () => {
     const { gitOps, exec } = createFixture();
     exec.mockResolvedValue({
@@ -309,19 +280,6 @@ describe("read-only operations", () => {
 
     const sha = await gitOps.revParseHead("/repo");
     expect(sha).toBe("abc123");
-  });
-
-  it("symbolicRefHead returns trimmed ref", async () => {
-    const { gitOps, exec } = createFixture();
-    exec.mockResolvedValue({
-      stdout: "refs/heads/main\n",
-      stderr: "",
-      code: 0,
-      killed: false,
-    });
-
-    const ref = await gitOps.symbolicRefHead("/repo");
-    expect(ref).toBe("refs/heads/main");
   });
 });
 
@@ -375,18 +333,6 @@ describe("read-only ops throw on git error", () => {
     );
   });
 
-  it("lsFiles throws when git exits non-zero", async () => {
-    const exec = vi.fn().mockResolvedValue({
-      stdout: "",
-      stderr: "fatal: not a git repository",
-      code: 128,
-      killed: false,
-    });
-    const gitOps = makeFixture(exec);
-
-    await expect(gitOps.lsFiles()).rejects.toThrow("git exited 128: fatal: not a git repository");
-  });
-
   it("revParseHead throws when git exits non-zero", async () => {
     const exec = vi.fn().mockResolvedValue({
       stdout: "",
@@ -397,20 +343,6 @@ describe("read-only ops throw on git error", () => {
     const gitOps = makeFixture(exec);
 
     await expect(gitOps.revParseHead()).rejects.toThrow(
-      "git exited 128: fatal: not a git repository",
-    );
-  });
-
-  it("symbolicRefHead throws when git exits non-zero", async () => {
-    const exec = vi.fn().mockResolvedValue({
-      stdout: "",
-      stderr: "fatal: not a git repository",
-      code: 128,
-      killed: false,
-    });
-    const gitOps = makeFixture(exec);
-
-    await expect(gitOps.symbolicRefHead()).rejects.toThrow(
       "git exited 128: fatal: not a git repository",
     );
   });
@@ -548,16 +480,6 @@ describe("ref-mutating operations", () => {
 
     expect(exec).toHaveBeenNthCalledWith(1, "git", ["add", "-A"]);
     expect(exec).toHaveBeenNthCalledWith(2, "git", ["commit", "-m", "quick fix"]);
-  });
-
-  it("checkoutIn checks out sha in given worktree", async () => {
-    const { gitOps, exec } = createFixture();
-
-    await gitOps.checkoutIn("/worktrees/fix", "def456");
-
-    expect(exec).toHaveBeenCalledWith("git", ["checkout", "def456"], {
-      cwd: "/worktrees/fix",
-    });
   });
 });
 

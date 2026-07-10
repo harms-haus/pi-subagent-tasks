@@ -184,9 +184,6 @@ export interface Scheduler {
   /** True when the scheduler has determined no more work will happen. */
   isComplete(): boolean;
 
-  /** Number of agents currently in-flight (across all tasks). */
-  getInFlightCount(): number;
-
   /**
    * Lazily create worktrees for tasks that are ready to start but don't
    * yet have one (D10 / §10.1, H1).
@@ -399,6 +396,9 @@ export function createScheduler(opts: SchedulerOptions): Scheduler {
       if (action === "task-restart") {
         task.status = "ready";
         task.retryCount++;
+        // Reset the elapsed timer for the fresh attempt (N3). It will be
+        // re-stamped when the task next transitions to "running".
+        task.startedAt = undefined;
         // Remove old worktree and create a new one for the restarted task.
         // If the callback throws, the task transitions to failed so the
         // scheduler does not hang.
@@ -439,6 +439,9 @@ export function createScheduler(opts: SchedulerOptions): Scheduler {
         // in the "running" state.
         if (canTransition(task.status, "running")) {
           task.status = "running";
+          // Stamp the first start time (N3). `??=` preserves the original
+          // timestamp across soft-retries.
+          task.startedAt ??= Date.now();
           opts.onAudit?.("task_running", { taskId: task.id });
         }
       } else {
@@ -530,6 +533,10 @@ export function createScheduler(opts: SchedulerOptions): Scheduler {
 
         if (started && canTransition(prevStatus, "running")) {
           candidate.status = "running";
+          // Stamp the first start time (N3). `??=` preserves the original
+          // timestamp across soft-retries, which re-enter without going
+          // through the ready→running transition.
+          candidate.startedAt ??= Date.now();
           opts.onAudit?.("task_running", { taskId: candidate.id });
         }
       }
@@ -619,9 +626,6 @@ export function createScheduler(opts: SchedulerOptions): Scheduler {
         return complete && inFlight.size === 0;
       }
       return complete;
-    },
-    getInFlightCount(): number {
-      return inFlight.size;
     },
   };
 

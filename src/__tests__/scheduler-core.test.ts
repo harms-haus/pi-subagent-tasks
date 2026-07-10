@@ -251,7 +251,6 @@ describe("scheduler core", () => {
     scheduler.globalSchedule();
     expect(pool.tasks[0]!.runningAgentCount).toBe(1);
     expect(pool.tasks[0]!.status).toBe("running");
-    expect(scheduler.getInFlightCount()).toBe(1);
 
     // Wait for agent to complete (microtask flush)
     await flushMicrotasks();
@@ -263,7 +262,6 @@ describe("scheduler core", () => {
     expect(pool.tasks[0]!.status).toBe("done");
     expect(pool.mergeQueue).toEqual([]);
     expect(scheduler.isComplete()).toBe(true);
-    expect(scheduler.getInFlightCount()).toBe(0);
   });
 
   // ── Test 2: Two independent tasks ────────────────────────────────────
@@ -303,7 +301,6 @@ describe("scheduler core", () => {
     expect(t1.runningAgentCount).toBe(1);
     expect(t2.status).toBe("running");
     expect(t2.runningAgentCount).toBe(1);
-    expect(scheduler.getInFlightCount()).toBe(2);
 
     // Wait for both to finish
     await flushMicrotasks();
@@ -692,7 +689,6 @@ describe("scheduler core", () => {
 
     // After one pass with all terminal tasks + no merge queue + no in-flight
     expect(scheduler.isComplete()).toBe(true);
-    expect(scheduler.getInFlightCount()).toBe(0);
   });
 
   // ── Additional coverage: mergeComplete public method ───────────────
@@ -1165,14 +1161,12 @@ describe("scheduler core", () => {
 
     // Start the agent — runAgent throws, rejection handler fires.
     scheduler.globalSchedule();
-    expect(scheduler.getInFlightCount()).toBe(1);
     expect(pools.usage().total.used).toBe(1);
 
     // Flush microtasks to fire the rejection handler.
     await flushMicrotasks();
 
     // The rejection handler releases all resources.
-    expect(scheduler.getInFlightCount()).toBe(0);
     expect(pool.tasks[0]!.runningAgentCount).toBe(0);
     expect(pools.usage().total.used).toBe(0);
 
@@ -1581,7 +1575,6 @@ describe("scheduler core", () => {
     // Start the agent
     scheduler.globalSchedule();
     expect(pool.tasks[0]!.status).toBe("running");
-    expect(scheduler.getInFlightCount()).toBe(1);
     expect(scheduler.isComplete()).toBe(false);
 
     // Abort while agent is in-flight
@@ -1598,7 +1591,6 @@ describe("scheduler core", () => {
     // Note: onAgentFinished does NOT check abort signal — it calls
     // globalSchedule which sets complete=true on abort, then
     // onUpdate fires. isComplete() requires inFlight.size === 0.
-    expect(scheduler.getInFlightCount()).toBe(0);
     expect(scheduler.isComplete()).toBe(true);
   });
 

@@ -117,11 +117,43 @@ describe("handleAgentError", () => {
     const audit = vi.fn();
 
     handleAgentError(t, "0", failResult(), { maxRetries: 2, onAudit: audit });
-    expect(audit).toHaveBeenCalledTimes(1);
+    expect(audit).toHaveBeenCalledTimes(2);
     expect(audit).toHaveBeenCalledWith("agent_retry", {
       taskId: "t-1",
       atomPath: "0",
       attempt: 1,
+    });
+  });
+
+  it("soft-retry: also emits agent_resume (session resume, §15 taxonomy)", () => {
+    const cursor = buildCursor(undefined, "0");
+    const t = task(cursor);
+    const audit = vi.fn();
+
+    handleAgentError(t, "0", failResult({ sessionFile: "/sessions/retry-1.jsonl" }), {
+      maxRetries: 2,
+      onAudit: audit,
+    });
+    // N6: a soft-retry RESUMES the session, so agent_resume must accompany
+    // agent_retry. The session id is the file stored on the node for resume.
+    expect(audit).toHaveBeenCalledWith("agent_resume", {
+      taskId: "t-1",
+      sessionId: "/sessions/retry-1.jsonl",
+    });
+  });
+
+  it("soft-retry: agent_resume carries sessionId undefined when result has none", () => {
+    const cursor = buildCursor(undefined, "0");
+    const t = task(cursor);
+    const audit = vi.fn();
+
+    handleAgentError(t, "0", failResult({ sessionFile: undefined }), {
+      maxRetries: 2,
+      onAudit: audit,
+    });
+    expect(audit).toHaveBeenCalledWith("agent_resume", {
+      taskId: "t-1",
+      sessionId: undefined,
     });
   });
 

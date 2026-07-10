@@ -8,6 +8,14 @@
 
 import { describe, it, expect, vi, beforeEach, afterEach } from "vitest";
 
+// Mock the profiles module so merge.ts's resolveProfile("merge-helper", cwd)
+// call is controllable per-test. Default returns an empty profile (no
+// provider/model) so existing conflict tests are unaffected.
+vi.mock("../profiles", () => ({
+  seedMergeHelperProfile: vi.fn(),
+  resolveProfile: vi.fn(() => ({})),
+}));
+
 import type { GitOps } from "../git-op";
 import type {
   AgentRunner,
@@ -19,6 +27,7 @@ import type {
 import type { PoolCoordinator } from "../pools";
 import type { MergeWorkerOptions } from "../merge";
 import { createMergeWorker, HELPER_ACQUIRE_POLL_MS, HELPER_ACQUIRE_TIMEOUT_MS } from "../merge";
+import { resolveProfile } from "../profiles";
 
 // ── Mock factory: GitOps ─────────────────────────────────────────────────────
 
@@ -51,9 +60,7 @@ function createMockGitOps(): GitOps {
       .mockResolvedValue([
         { path: "/repo", head: "aaa", branch: "refs/heads/main", branchName: "main" },
       ]),
-    lsFiles: vi.fn().mockResolvedValue([]),
     revParseHead: vi.fn().mockResolvedValue("merged-sha"),
-    symbolicRefHead: vi.fn().mockResolvedValue("refs/heads/main"),
     worktreeAdd: vi.fn().mockResolvedValue({ stdout: "", stderr: "", code: 0, killed: false }),
     worktreeRemove: vi.fn().mockResolvedValue({ stdout: "", stderr: "", code: 0, killed: false }),
     worktreePrune: vi.fn().mockResolvedValue({ stdout: "", stderr: "", code: 0, killed: false }),
@@ -61,7 +68,6 @@ function createMockGitOps(): GitOps {
     mergeFF: vi.fn().mockResolvedValue({ stdout: "", stderr: "", code: 0, killed: false }),
     mergeAbort: vi.fn().mockResolvedValue({ stdout: "", stderr: "", code: 0, killed: false }),
     commitAll: vi.fn().mockResolvedValue({ stdout: "", stderr: "", code: 0, killed: false }),
-    checkoutIn: vi.fn().mockResolvedValue({ stdout: "", stderr: "", code: 0, killed: false }),
   };
 }
 
@@ -308,12 +314,14 @@ describe("processNext — guard clauses", () => {
       taskId: "t-1",
       reason: "task not found",
     });
-    expect(onFailed).not.toHaveBeenCalled();
+    // N2b: onFailed MUST be called (not a bare return) so the scheduler's
+    // mergeComplete fires and accounting never sticks.
+    expect(onFailed).toHaveBeenCalledWith("t-1", "task not found");
     expect(opts.git.mergeFF).not.toHaveBeenCalled();
   });
 
   it("skips task when worktreePath is null", async () => {
-    const { opts, audit, getTask } = createBundle();
+    const { opts, audit, onFailed, getTask } = createBundle();
     getTask.mockReturnValue(makeTask({ worktreePath: null }));
 
     const worker = createMergeWorker(opts);
@@ -324,11 +332,13 @@ describe("processNext — guard clauses", () => {
       taskId: "t-1",
       reason: "no worktree or branch",
     });
+    // N2b: onFailed MUST fire so accounting never sticks.
+    expect(onFailed).toHaveBeenCalledWith("t-1", "no worktree or branch");
     expect(opts.git.mergeFF).not.toHaveBeenCalled();
   });
 
   it("skips task when branch is null", async () => {
-    const { opts, audit, getTask } = createBundle();
+    const { opts, audit, onFailed, getTask } = createBundle();
     getTask.mockReturnValue(makeTask({ branch: null }));
 
     const worker = createMergeWorker(opts);
@@ -339,6 +349,8 @@ describe("processNext — guard clauses", () => {
       taskId: "t-1",
       reason: "no worktree or branch",
     });
+    // N2b: onFailed MUST fire so accounting never sticks.
+    expect(onFailed).toHaveBeenCalledWith("t-1", "no worktree or branch");
     expect(opts.git.mergeFF).not.toHaveBeenCalled();
   });
 });
@@ -670,6 +682,56 @@ describe("merge conflict — FF failure", () => {
 
     // No helper was spawned
     expect(agentRunner.received).toHaveLength(0);
+  });
+
+  // ── N7: merge-helper consumes its real provider/model slots ────────
+
+  it("N7: acquires and releases the helper slot against the merge-helper profile's provider/model", async () => {
+    const { opts, git, pools, getTask } = createBundle();
+    const task = makeTask();
+    getTask.mockReturnValue(task);
+
+    // FF merge fails → conflict path
+    git.mergeFF = vi.fn().mockResolvedValue({ stdout: "", stderr: "", code: 1, killed: false });
+    git.conflictedFiles = vi.fn().mockResolvedValueOnce(["src/file1.ts"]).mockResolvedValueOnce([]);
+
+    // The merge-helper profile declares a real provider + model.
+    vi.mocked(resolveProfile).mockReturnValueOnce({
+      provider: "anthropic",
+      model: "claude-sonnet",
+    });
+
+    const worker = createMergeWorker(opts);
+    worker.enqueue("t-1");
+    await worker.processNext();
+
+    // The slot was acquired against the helper's real provider/model (not
+    // undefined/undefined), so provider/model caps are honoured (N7).
+    expect(pools.tryAcquire).toHaveBeenCalledWith("anthropic", "claude-sonnet");
+    // Acquire and release MUST stay symmetric so accounting doesn't drift.
+    expect(pools.release).toHaveBeenCalledWith("anthropic", "claude-sonnet");
+  });
+
+  it("N7: falls back to total-only when the merge-helper profile can't be resolved", async () => {
+    const { opts, git, pools, getTask } = createBundle();
+    const task = makeTask();
+    getTask.mockReturnValue(task);
+
+    git.mergeFF = vi.fn().mockResolvedValue({ stdout: "", stderr: "", code: 1, killed: false });
+    git.conflictedFiles = vi.fn().mockResolvedValueOnce(["src/file1.ts"]).mockResolvedValueOnce([]);
+
+    // Profile resolution throws → falls back to (undefined, undefined).
+    vi.mocked(resolveProfile).mockImplementationOnce(() => {
+      throw new Error("profile not found");
+    });
+
+    const worker = createMergeWorker(opts);
+    worker.enqueue("t-1");
+    await worker.processNext();
+
+    // Only the total pool is touched.
+    expect(pools.tryAcquire).toHaveBeenCalledWith(undefined, undefined);
+    expect(pools.release).toHaveBeenCalledWith(undefined, undefined);
   });
 });
 

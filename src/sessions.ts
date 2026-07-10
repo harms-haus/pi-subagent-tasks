@@ -9,8 +9,8 @@
  * See §11 (agent spawning) and §12 (state persistence) of the extension spec.
  */
 
-import { readdirSync, renameSync, statSync } from "node:fs";
-import { join, extname } from "node:path";
+import { readdirSync, renameSync } from "node:fs";
+import { join } from "node:path";
 import type { Dirent } from "node:fs";
 
 import { timecode, slugify } from "./utils";
@@ -30,19 +30,24 @@ const NESTED_DIR_RE = /^--.+--$/;
 // ── Public API ───────────────────────────────────────────────────────────────
 
 /**
- * Find the newest session file in `sessionDir`.
+ * Find a session file deterministically by its session id.
  *
- * **Dual-search strategy:**
- *   1. Scan `sessionDir` for flat `<ts>_<uuid>.jsonl` files; return the newest
- *      by modification time.
- *   2. If none found flat, look for subdirectories matching `--<cwd>--` (the
- *      nested form pi may produce) and recurse one level for the newest
- *      `.jsonl` file.
+ * pi names session files `<timestamp>_<sessionId>.jsonl`, where
+ * `<sessionId>` is the UUID emitted in the `session` header (the first JSON
+ * line, §11/docs/json.md: `{"type":"session","version":3,"id":"<uuid>",...}`).
+ * The spawner captures this id; the caller passes it here to locate the
+ * exact file — avoiding the racy "globally newest" heuristic that
+ * misattributes files whenever ≥2 agents run concurrently (N1).
  *
- * Returns `undefined` when no session file is found or the directory is
+ * **Search strategy** (first match wins):
+ *   1. Scan `sessionDir` for a flat file matching `*_<sessionId>.jsonl`.
+ *   2. Scan `--<cwd>--` subdirectories (the nested form pi may produce) for
+ *      a `.jsonl` file matching `*_<sessionId>.jsonl`.
+ *
+ * Returns `undefined` when no matching file is found or the directory is
  * inaccessible.
  */
-export function findSessionFile(sessionDir: string): string | undefined {
+export function findSessionFileById(sessionDir: string, sessionId: string): string | undefined {
   let entries: Dirent[];
   try {
     entries = readdirSync(sessionDir, { withFileTypes: true });
@@ -50,30 +55,19 @@ export function findSessionFile(sessionDir: string): string | undefined {
     return undefined;
   }
 
-  // Phase 1 — flat session files
-  const flatFiles: { path: string; mtime: number }[] = [];
+  const suffix = `_${sessionId}.jsonl`;
 
+  // Phase 1 — flat session files
   for (const entry of entries) {
     if (!entry.isFile()) continue;
+    if (!entry.name.endsWith(suffix)) continue;
+    // Guard: must be a canonical flat name (<ts>_<uuid>.jsonl)
     if (!FLAT_SESSION_RE.test(entry.name)) continue;
-    const absPath = join(sessionDir, entry.name);
-    try {
-      const st = statSync(absPath);
-      flatFiles.push({ path: absPath, mtime: st.mtimeMs });
-    } catch {
-      // race with deletion — skip
-    }
+    return join(sessionDir, entry.name);
   }
 
-  if (flatFiles.length > 0) {
-    flatFiles.sort((a, b) => b.mtime - a.mtime);
-    return flatFiles[0]?.path;
-  }
-
-  // Phase 2 — nested fallback: look inside --<cwd>-- subdirectories
+  // Phase 2 — nested --<cwd>-- subdirectories
   const nestedDirs = entries.filter((e) => e.isDirectory() && NESTED_DIR_RE.test(e.name));
-
-  let best: { path: string; mtime: number } | undefined;
 
   for (const dir of nestedDirs) {
     const dirPath = join(sessionDir, dir.name);
@@ -85,20 +79,12 @@ export function findSessionFile(sessionDir: string): string | undefined {
     }
     for (const file of dirEntries) {
       if (!file.isFile()) continue;
-      if (extname(file.name) !== ".jsonl") continue;
-      const filePath = join(dirPath, file.name);
-      try {
-        const st = statSync(filePath);
-        if (!best || st.mtimeMs > best.mtime) {
-          best = { path: filePath, mtime: st.mtimeMs };
-        }
-      } catch {
-        // race — skip
-      }
+      if (!file.name.endsWith(suffix)) continue;
+      return join(dirPath, file.name);
     }
   }
 
-  return best?.path;
+  return undefined;
 }
 
 /**

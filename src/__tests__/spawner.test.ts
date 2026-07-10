@@ -235,6 +235,80 @@ describe("spawnAgent", () => {
     expect(result.verdict).toBeUndefined();
   });
 
+  // ── (b2) Session id capture (N1) ─────────────────────────────────────
+
+  it("captures sessionId from the type:session header event", async () => {
+    const promise = spawnAgent(defaultOpts);
+
+    feedAndExit([
+      `{"type":"session","version":3,"id":"a1b2c3d4-e5f6-7890-abcd-ef1234567890","timestamp":"2026-07-10T00:00:00Z","cwd":"/tmp/workdir"}`,
+      `{"type":"message_end","message":{"content":[{"type":"text","text":"done"}]}}`,
+    ]);
+
+    const result = await promise;
+    expect(result.sessionId).toBe("a1b2c3d4-e5f6-7890-abcd-ef1234567890");
+  });
+
+  it("captures sessionId from a partial (no trailing newline) session header", async () => {
+    const promise = spawnAgent(defaultOpts);
+
+    // Session header arrives without a trailing newline — flushRemainders
+    // parses it on close.
+    emitStdout(`{"type":"session","version":3,"id":"sess-partial-id","cwd":"/tmp/workdir"}`);
+    emitExit(0);
+    emitClose(0);
+
+    const result = await promise;
+    expect(result.sessionId).toBe("sess-partial-id");
+  });
+
+  it("leaves sessionId undefined when no session header is emitted", async () => {
+    const promise = spawnAgent(defaultOpts);
+
+    feedAndExit([
+      `{"type":"message_end","message":{"content":[{"type":"text","text":"no header"}]}}`,
+    ]);
+
+    const result = await promise;
+    expect(result.sessionId).toBeUndefined();
+  });
+
+  it("ignores a session header with a non-string id", async () => {
+    const promise = spawnAgent(defaultOpts);
+
+    feedAndExit([
+      `{"type":"session","version":3,"id":12345,"cwd":"/tmp/workdir"}`,
+      `{"type":"message_end","message":{"content":[{"type":"text","text":"x"}]}}`,
+    ]);
+
+    const result = await promise;
+    expect(result.sessionId).toBeUndefined();
+  });
+
+  it("captures only the first session header (ignores subsequent ones)", async () => {
+    const promise = spawnAgent(defaultOpts);
+
+    feedAndExit([
+      `{"type":"session","version":3,"id":"first-id","cwd":"/tmp/workdir"}`,
+      `{"type":"session","version":3,"id":"second-id","cwd":"/tmp/workdir"}`,
+    ]);
+
+    const result = await promise;
+    expect(result.sessionId).toBe("first-id");
+  });
+
+  it("captures sessionId even on a spawn error result", async () => {
+    const promise = spawnAgent(defaultOpts);
+
+    // Emit the session header before the error
+    emitStdout(`{"type":"session","version":3,"id":"err-session-id","cwd":"/tmp/workdir"}\n`);
+    emitError("spawn failed");
+
+    const result = await promise;
+    expect(result.sessionId).toBe("err-session-id");
+    expect(result.exitCode).toBe(-1);
+  });
+
   // ── (c) Loop detection ─────────────────────────────────────────────────
 
   it("detects loop when last LOOP_DETECT_COUNT signatures are identical", async () => {

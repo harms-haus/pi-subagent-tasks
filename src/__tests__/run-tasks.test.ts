@@ -96,7 +96,6 @@ function createMockScheduler() {
     onAgentFinished: vi.fn(),
     ensureWorktrees: vi.fn(async () => {}),
     isComplete: vi.fn(() => completed),
-    getInFlightCount: vi.fn(() => 0),
     mergeComplete: vi.fn(() => {
       completed = true;
     }),
@@ -170,9 +169,7 @@ function createToolWithMocks() {
     statusPorcelain: vi.fn().mockResolvedValue(""),
     conflictedFiles: vi.fn().mockResolvedValue([]),
     worktreeList: vi.fn().mockResolvedValue([]),
-    lsFiles: vi.fn().mockResolvedValue([]),
     revParseHead: vi.fn().mockResolvedValue("abc123def"),
-    symbolicRefHead: vi.fn().mockResolvedValue("refs/heads/main"),
     worktreeAdd: vi.fn(),
     worktreeRemove: vi.fn(),
     worktreePrune: vi.fn(),
@@ -180,7 +177,6 @@ function createToolWithMocks() {
     mergeFF: vi.fn().mockResolvedValue({ stdout: "", stderr: "", code: 0, killed: false }),
     mergeAbort: vi.fn(),
     commitAll: vi.fn(),
-    checkoutIn: vi.fn(),
   } as unknown as import("../git-op").GitOps;
 
   const childProcesses = new Set<import("node:child_process").ChildProcess>();
@@ -474,7 +470,6 @@ describe("run_tasks tool", () => {
       onAgentFinished: vi.fn(),
       ensureWorktrees: vi.fn(async () => {}),
       isComplete: vi.fn(() => schedulerCompleted),
-      getInFlightCount: vi.fn(() => 0),
       mergeComplete: vi.fn(),
     };
     (schedulerModule.createComposeScheduler as ReturnType<typeof vi.fn>).mockReturnValue(

@@ -26,7 +26,7 @@ import type { ExtensionAPI } from "@earendil-works/pi-coding-agent";
 
 import { spawnAgent } from "./spawner";
 import { resolveProfile, profileToArgs } from "./profiles";
-import { buildSpawnSessionArgs, findSessionFile, renameSession } from "./sessions";
+import { buildSpawnSessionArgs, findSessionFileById, renameSession } from "./sessions";
 import type { AgentRunner, AgentDemand, AgentRunOptions, AgentRunResult } from "./types";
 
 // ── Binary resolution ────────────────────────────────────────────────────────
@@ -180,10 +180,16 @@ export function createRealAgentRunner(opts: RealAgentRunnerOptions): AgentRunner
         },
       });
 
-      // 6. Find and rename the session file (only when a real process ran)
+      // 6. Find and rename the session file by its session id (only when a
+      //    real process ran AND we captured the session id from the
+      //    `type:"session"` header). Locating by id is deterministic and
+      //    avoids the racy "globally newest" heuristic that misattributes
+      //    files under concurrency (N1). When the id is absent (unexpected
+      //    with a real pi binary) we leave sessionFile undefined rather than
+      //    guessing.
       let sessionFile: string | undefined;
-      if (result.exitCode !== -1) {
-        const found = findSessionFile(runOpts.sessionDir);
+      if (result.exitCode !== -1 && result.sessionId !== undefined) {
+        const found = findSessionFileById(runOpts.sessionDir, result.sessionId);
         if (found) {
           try {
             sessionFile = renameSession(found, runOpts.sessionDir, demand.atomPath);

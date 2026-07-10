@@ -51,6 +51,11 @@ export interface PoolCoordinator {
    * Wake-up hook invoked after every {@link release}. No-op by default; the
    * scheduler re-runs its scheduling pass around `release`, but may reassign
    * this to plug in a custom wake-up.
+   *
+   * This is an intentional extensibility hook: the scheduler drives its own
+   * scheduling pass on every state mutation and does NOT rely on this hook,
+   * so it is a no-op in the default `createPoolCoordinator` construction.
+   * It exists for custom coordinators that want push-style wake-ups.
    */
   wakeWaiters(): void;
 }

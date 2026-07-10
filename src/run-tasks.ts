@@ -65,7 +65,7 @@ import {
 import { renderBoard, renderSummary } from "./render";
 import { resolveDeps, detectCycles, computeDownstreamCount } from "./dag";
 import { recomputeInitialStatuses, propagateFailures } from "./status";
-import { buildCursor } from "./cursor";
+import { buildCursor, isComposeComplete } from "./cursor";
 import { slugify, poolDir } from "./utils";
 import { seedMergeHelperProfile, resolveProfile } from "./profiles";
 import { DEFAULT_TOTAL_LIMIT, DEFAULT_MAX_RETRIES, BRANCH_PREFIX } from "./constants";
@@ -416,6 +416,37 @@ async function runPool(params: Record<string, unknown>, rpc: RunPoolContext) {
             path: task.worktreePath,
             reason: "has-progress",
           });
+        }
+      }
+
+      // N2a: reconcile completed-but-unmerged tasks and a stale mergeQueue so
+      // a pool aborted mid-merge can recover instead of hanging.
+      //
+      // The mergeQueue is transient (rebuilt from in-flight merges), so clear
+      // any stale persisted entries — an id whose worktree/branch is already
+      // gone would hit the no-worktree guard in processOne and (before the
+      // N2b fix) strand accounting forever.
+      pool.mergeQueue = [];
+
+      // For each task whose atoms are fully executed (cursor complete) but
+      // whose status is not "done", the merge never completed because of a
+      // crash/abort in the window between the last atom succeeding and the
+      // merge marking it done.
+      for (const t of pool.tasks) {
+        if (isComposeComplete(t.cursor) && t.status !== "done") {
+          if (t.worktreePath !== null) {
+            // Worktree still exists → merge is genuinely pending: set the
+            // task to running and re-enqueue it so the merge worker drains
+            // it (onAgentFinished-style merge-enqueue only fires on agent
+            // success, which won't re-trigger for an already-complete cursor).
+            t.status = "running";
+            pool.mergeQueue.push(t.id);
+          } else {
+            // worktreePath === null — the worktree was already removed, which
+            // only happens after a successful merge+cleanup. The merge
+            // actually completed before the crash but persisted status lagged.
+            t.status = "done";
+          }
         }
       }
 
@@ -805,6 +836,20 @@ async function runPool(params: Record<string, unknown>, rpc: RunPoolContext) {
     if (!rpc.signal?.aborted) {
       // Propagate failures to dependent tasks.
       propagateFailures(pool.tasks);
+
+      // N6 (§15): emit task_skipped for tasks that failed purely by
+      // propagation (a dependency failed), so the audit log can distinguish
+      // a genuine failure from a transitive skip. Mirrors the summary's
+      // SKIPPED-vs-FAILED prefix check on lastError.
+      for (const t of pool.tasks) {
+        if (
+          t.status === "failed" &&
+          t.lastError !== undefined &&
+          t.lastError.startsWith("depends on failed")
+        ) {
+          audit.log("task_skipped", { taskId: t.id, reason: t.lastError });
+        }
+      }
 
       // Update pool status.
       pool.status = "done";

@@ -32,14 +32,14 @@ const {
   mockSpawnAgent,
   mockResolveProfile,
   mockProfileToArgs,
-  mockFindSessionFile,
+  mockFindSessionFileById,
   mockRenameSession,
   mockExecSync,
 } = vi.hoisted(() => ({
   mockSpawnAgent: vi.fn<(opts: Record<string, unknown>) => Promise<SpawnResult>>(),
   mockResolveProfile: vi.fn<(name: string, cwd: string) => Profile>(),
   mockProfileToArgs: vi.fn<(profile: Profile) => { args: string[]; env: Record<string, string> }>(),
-  mockFindSessionFile: vi.fn<(sessionDir: string) => string | undefined>(),
+  mockFindSessionFileById: vi.fn<(sessionDir: string, sessionId: string) => string | undefined>(),
   mockRenameSession: vi.fn<(src: string, dir: string, name: string) => string>(),
   // Stands in for `which pi` inside resolvePiBinary(). Default impl (set in
   // beforeEach) reports `pi` as absent so binary resolution is deterministic
@@ -58,12 +58,12 @@ vi.mock("../profiles", () => ({
   profileToArgs: mockProfileToArgs,
 }));
 
-// Keep buildSpawnSessionArgs real; mock findSessionFile and renameSession.
+// Keep buildSpawnSessionArgs real; mock findSessionFileById and renameSession.
 vi.mock("../sessions", async () => {
   const actual = await vi.importActual<typeof import("../sessions")>("../sessions");
   return {
     ...actual,
-    findSessionFile: mockFindSessionFile,
+    findSessionFileById: mockFindSessionFileById,
     renameSession: mockRenameSession,
   };
 });
@@ -136,6 +136,7 @@ function successfulSpawnResult(overrides?: Partial<SpawnResult>): SpawnResult {
     verdict: undefined,
     loopDetected: false,
     durationMs: 1200,
+    sessionId: "test-session-id",
     ...overrides,
   };
 }
@@ -172,7 +173,7 @@ describe("createRealAgentRunner", () => {
       }
       return successfulSpawnResult();
     });
-    mockFindSessionFile.mockReturnValue("/tmp/sessions/raw_session.jsonl");
+    mockFindSessionFileById.mockReturnValue("/tmp/sessions/raw_session.jsonl");
     mockRenameSession.mockImplementation(
       (_src: string, dir: string, name: string) =>
         `${dir}/20260709T120000Z-${name.replace(/[^a-z0-9]+/g, "-")}.jsonl`,
@@ -310,7 +311,7 @@ describe("createRealAgentRunner", () => {
 
   it("maps exitCode 0 + lastText → success:true + sessionFile set", async () => {
     const runner = createRunner();
-    mockFindSessionFile.mockReturnValue("/tmp/sessions/raw_abc.jsonl");
+    mockFindSessionFileById.mockReturnValue("/tmp/sessions/raw_abc.jsonl");
     mockRenameSession.mockReturnValue("/tmp/sessions/20260709T120000Z-sequential-0-agent-0.jsonl");
 
     const result: AgentRunResult = await runner.runAgent(defaultDemand, defaultRunOpts);
@@ -387,18 +388,37 @@ describe("createRealAgentRunner", () => {
     const result = await runner.runAgent(defaultDemand, defaultRunOpts);
 
     expect(result.sessionFile).toBeUndefined();
-    expect(mockFindSessionFile).not.toHaveBeenCalled();
+    expect(mockFindSessionFileById).not.toHaveBeenCalled();
     expect(mockRenameSession).not.toHaveBeenCalled();
   });
 
-  it("invokes findSessionFile and renameSession on success", async () => {
-    mockFindSessionFile.mockReturnValue("/tmp/sessions/raw_xyz.jsonl");
+  it("skips session finding when sessionId is undefined (no session header captured)", async () => {
+    // N1: when the spawner didn't capture a session id (unexpected with a
+    // real pi binary, but possible), we must NOT fall back to the racy
+    // globally-newest heuristic — leave sessionFile undefined instead.
+    mockSpawnAgent.mockResolvedValue(successfulSpawnResult({ sessionId: undefined }));
+    const runner = createRunner();
+
+    const result = await runner.runAgent(defaultDemand, defaultRunOpts);
+
+    expect(result.sessionFile).toBeUndefined();
+    expect(mockFindSessionFileById).not.toHaveBeenCalled();
+    expect(mockRenameSession).not.toHaveBeenCalled();
+  });
+
+  it("invokes findSessionFileById and renameSession on success", async () => {
+    mockFindSessionFileById.mockReturnValue("/tmp/sessions/raw_xyz.jsonl");
     mockRenameSession.mockReturnValue("/tmp/sessions/20260709T120000Z-canonical.jsonl");
     const runner = createRunner();
 
     const result = await runner.runAgent(defaultDemand, defaultRunOpts);
 
-    expect(mockFindSessionFile).toHaveBeenCalledWith(defaultRunOpts.sessionDir);
+    // findSessionFileById is called with the session id captured from the
+    // spawn result (N1 — deterministic lookup by id, not globally-newest).
+    expect(mockFindSessionFileById).toHaveBeenCalledWith(
+      defaultRunOpts.sessionDir,
+      "test-session-id",
+    );
     expect(mockRenameSession).toHaveBeenCalledWith(
       "/tmp/sessions/raw_xyz.jsonl",
       defaultRunOpts.sessionDir,
@@ -407,8 +427,8 @@ describe("createRealAgentRunner", () => {
     expect(result.sessionFile).toBe("/tmp/sessions/20260709T120000Z-canonical.jsonl");
   });
 
-  it("does not set sessionFile when findSessionFile returns undefined", async () => {
-    mockFindSessionFile.mockReturnValue(undefined);
+  it("does not set sessionFile when findSessionFileById returns undefined", async () => {
+    mockFindSessionFileById.mockReturnValue(undefined);
     const runner = createRunner();
 
     const result = await runner.runAgent(defaultDemand, defaultRunOpts);

@@ -74,6 +74,10 @@ export function handleAgentError(
       atomPath,
       attempt: node.executionCount,
     });
+    // N6 (§15): a soft-retry RESUMES the session, so emit agent_resume
+    // alongside agent_retry. The session id is the file path stored on the
+    // node for resume (result.sessionFile).
+    opts.onAudit?.("agent_resume", { taskId: task.id, sessionId: result.sessionFile });
     return "soft-retry";
   }
 

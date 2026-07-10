@@ -17,6 +17,7 @@ import type { GitOps } from "./git-op";
 import type { AgentDemand, AgentRunner, AgentRunOptions, TaskRuntime } from "./types";
 import type { PoolCoordinator } from "./pools";
 import { removeTaskWorktree } from "./worktrees";
+import { resolveProfile } from "./profiles";
 
 // ── Slot-acquire tuning (merge-helper) ───────────────────────────────────────
 
@@ -156,13 +157,35 @@ export function createMergeWorker(opts: MergeWorkerOptions): MergeWorker {
   async function processOne(taskId: string): Promise<void> {
     const task = opts.getTask(taskId);
     if (!task) {
+      // N2b: even on a skip, we MUST call onFailed so the scheduler's
+      // mergeComplete fires and accounting never sticks (a bare return
+      // here leaves mergeInProgress true and the id at queue head → hang).
       opts.audit("merge_skipped", { taskId, reason: "task not found" });
+      try {
+        opts.onFailed(taskId, "task not found");
+      } catch (cbErr) {
+        opts.audit("merge_callback_error", {
+          taskId,
+          phase: "onFailed",
+          reason: cbErr instanceof Error ? cbErr.message : String(cbErr),
+        });
+      }
       return;
     }
     const worktreePath = task.worktreePath;
     const branch = task.branch;
     if (!worktreePath || !branch) {
+      // N2b: same as above — a bare return would strand accounting.
       opts.audit("merge_skipped", { taskId, reason: "no worktree or branch" });
+      try {
+        opts.onFailed(taskId, "no worktree or branch");
+      } catch (cbErr) {
+        opts.audit("merge_callback_error", {
+          taskId,
+          phase: "onFailed",
+          reason: cbErr instanceof Error ? cbErr.message : String(cbErr),
+        });
+      }
       return;
     }
 
@@ -191,8 +214,8 @@ export function createMergeWorker(opts: MergeWorkerOptions): MergeWorker {
    * notify the caller.
    *
    * NOTE: `merge --ff-only` already updated HEAD to the merged commit, so
-   * we do NOT call checkoutIn/revParseHead — that would detach HEAD and
-   * break subsequent merges.
+   * we do NOT call revParseHead — that would detach HEAD and break
+   * subsequent merges.
    */
   async function handleFfSuccess(
     taskId: string,
@@ -257,13 +280,29 @@ export function createMergeWorker(opts: MergeWorkerOptions): MergeWorker {
     }
 
     // The merge-helper consumes a concurrency slot like any other agent
-    // (§17.6, D7). Wait for one to free up before spawning so the `total`
-    // cap is never exceeded. Acquiring with (undefined, undefined) only
-    // touches the `total` pool, consistent with the rest of the codebase's
-    // current provider/model handling. The wait is bounded — a generous
-    // timeout (and an optional abort signal) ensures a permanently-full
-    // pool fails the merge rather than hanging the serial queue.
-    const slotAcquired = await acquireHelperSlot(opts.pools, opts.signal);
+    // (§17.6, D7): before spawning it we wait for a slot to free up so the
+    // `total` cap — and the helper's real provider/model caps — are never
+    // exceeded. The helper's provider/model are resolved from its profile
+    // (N7); if the profile can't be resolved we fall back to total-only
+    // accounting. The wait is bounded — a generous timeout (and an optional
+    // abort signal) ensures a permanently-full pool fails the merge rather
+    // than hanging the serial queue.
+    let helperProvider: string | undefined;
+    let helperModel: string | undefined;
+    try {
+      const p = resolveProfile("merge-helper", opts.cwd);
+      helperProvider = p.provider;
+      helperModel = p.model;
+    } catch {
+      // merge-helper profile missing/unresolved → fall back to total-only
+    }
+
+    const slotAcquired = await acquireHelperSlot(
+      opts.pools,
+      helperProvider,
+      helperModel,
+      opts.signal,
+    );
     if (!slotAcquired) {
       const reason = "merge-helper could not acquire a concurrency slot";
       await opts.git.mergeAbort(opts.poolWorktree);
@@ -297,7 +336,7 @@ export function createMergeWorker(opts: MergeWorkerOptions): MergeWorker {
       try {
         await opts.agentRunner.runAgent(demand, runOpts);
       } finally {
-        opts.pools.release(undefined, undefined);
+        opts.pools.release(helperProvider, helperModel);
       }
 
       // Check whether conflicts were resolved.
@@ -350,7 +389,7 @@ function buildMergeHelperPrompt(task: TaskRuntime, conflictFiles: string[]): str
 }
 
 /**
- * Acquire a merge-helper slot from the `total` pool, polling every
+ * Acquire a merge-helper slot from the concurrency pools, polling every
  * {@link HELPER_ACQUIRE_POLL_MS} until one is available.
  *
  * Resolves `true` once a slot is acquired, or `false` if the
@@ -358,13 +397,20 @@ function buildMergeHelperPrompt(task: TaskRuntime, conflictFiles: string[]): str
  * provided) aborts first — in which case the caller should treat the merge
  * as failed.
  *
- * Polls with `(undefined, undefined)` so only the `total` pool is touched,
- * matching the codebase's current provider/model handling.
+ * Acquires against `provider`/`model` (when provided) so the merge-helper
+ * is counted against its real provider/model caps (§17.6, D7 / N7), not
+ * just the `total` pool. When both are `undefined` (e.g. the merge-helper
+ * profile couldn't be resolved) only the `total` pool is touched.
  */
-async function acquireHelperSlot(pools: PoolCoordinator, signal?: AbortSignal): Promise<boolean> {
+async function acquireHelperSlot(
+  pools: PoolCoordinator,
+  provider?: string,
+  model?: string,
+  signal?: AbortSignal,
+): Promise<boolean> {
   const deadline = Date.now() + HELPER_ACQUIRE_TIMEOUT_MS;
   for (;;) {
-    if (pools.tryAcquire(undefined, undefined)) return true;
+    if (pools.tryAcquire(provider, model)) return true;
     if (signal?.aborted) return false;
     const remaining = deadline - Date.now();
     if (remaining <= 0) return false;
