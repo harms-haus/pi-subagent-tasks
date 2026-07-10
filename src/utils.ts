@@ -1,5 +1,5 @@
 /**
- * Pure utility helpers for pi-task-pools.
+ * Pure utility helpers for pi-subagent-tasks.
  *
  * No agent/spawn/git logic lives here — these are small, dependency-light,
  * easily testable functions used across the scheduler, state, and render layers.
@@ -82,7 +82,7 @@ export function getProjectProfilesDir(cwd: string): string {
 }
 
 /**
- * Resolve the on-disk directory for a pool: `<cwd>/.pi/task-pools/<id>` (§12).
+ * Resolve the on-disk directory for a pool: `<cwd>/.pi/subagent-tasks/<id>` (§12).
  */
 export function poolDir(cwd: string, id: string): string {
   return join(cwd, STATE_DIR_REL, id);

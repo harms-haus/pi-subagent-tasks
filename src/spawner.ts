@@ -1,5 +1,5 @@
 /**
- * Agent spawner for pi-task-pools.
+ * Agent spawner for pi-subagent-tasks.
  *
  * @module spawner
  *

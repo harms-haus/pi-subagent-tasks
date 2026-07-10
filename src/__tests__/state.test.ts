@@ -60,7 +60,7 @@ function makeTask(cursor: CursorNode, overrides?: Partial<TaskRuntime>): TaskRun
     retryCount: 0,
     runningAgentCount: 0,
     worktreePath: "/tmp/wt",
-    branch: "pi-task-pool/test/t-1",
+    branch: "pi-subagent-task/test/t-1",
     sessionFiles: [],
     downstreamCount: 0,
     ...overrides,
@@ -72,7 +72,7 @@ function makePool(tasks: TaskRuntime[], overrides?: Partial<PoolState>): PoolSta
   return {
     id: "pool-1",
     name: "Test Pool",
-    branch: "pi-task-pool/test",
+    branch: "pi-subagent-task/test",
     poolWorktree: "/tmp/pool-wt",
     baseBranch: "main",
     limits: { total: 4, provider: {}, model: {} },
@@ -201,7 +201,7 @@ describe("writeState / readState", () => {
     expect(loadedT1.retryCount).toBe(1);
     expect(loadedT1.runningAgentCount).toBe(1);
     expect(loadedT1.worktreePath).toBe("/tmp/wt");
-    expect(loadedT1.branch).toBe("pi-task-pool/test/t-1");
+    expect(loadedT1.branch).toBe("pi-subagent-task/test/t-1");
     expect(loadedT1.sessionFiles).toEqual(["/sessions/t1-s1.jsonl"]);
     expect(loadedT1.downstreamCount).toBe(2);
     expect(loadedT1.startedAt).toBe(1500);
@@ -444,9 +444,9 @@ describe("createPoolDirs", () => {
 // ── listPools ───────────────────────────────────────────────────────────────
 
 describe("listPools", () => {
-  it("finds pool directories under .pi/task-pools/", () => {
+  it("finds pool directories under .pi/subagent-tasks/", () => {
     const cwd = makeTempDir();
-    // Create .pi/task-pools/ with two pool dirs
+    // Create .pi/subagent-tasks/ with two pool dirs
     const stateDir = join(cwd, STATE_DIR_REL);
     mkdirSync(join(stateDir, "pool-alpha"), { recursive: true });
     mkdirSync(join(stateDir, "pool-beta"), { recursive: true });

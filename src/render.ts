@@ -1,5 +1,5 @@
 /**
- * Board renderer + final summary for pi-task-pools.
+ * Board renderer + final summary for pi-subagent-tasks.
  *
  * Pure rendering functions that build pi-TUI component trees from pool state.
  * No I/O, no agent spawning — only UI construction.
@@ -99,7 +99,7 @@ const TIER_TOKENS: Record<Status, ThemeColor> = {
 };
 
 /**
- * Render the live task-pool board as a {@link Container} component tree.
+ * Render the live subagent-task board as a {@link Container} component tree.
  *
  * Tiers are rendered in {@link TIER_ORDER}. In collapsed view the board caps
  * at {@link COLLAPSED_ROW_CAP} rows and shows a "+N more" hint.
@@ -213,7 +213,7 @@ function buildBoardFooter(
 // ── Final summary (§6.2) ──────────────────────────────────────────────────
 
 /**
- * Build the task-pool final summary matching §6.2 **exactly**.
+ * Build the subagent-task final summary matching §6.2 **exactly**.
  *
  * Returns a `ToolRenderResult`-compatible object so the agent can emit it
  * directly as a tool result.
@@ -279,8 +279,8 @@ export function renderSummary(pool: PoolState): {
   }
 
   // ── On-disk paths ──
-  lines.push(`Sessions: .pi/task-pools/${pool.id}/sessions/`);
-  lines.push(`Audit:    .pi/task-pools/${pool.id}/audit.jsonl`);
+  lines.push(`Sessions: .pi/subagent-tasks/${pool.id}/sessions/`);
+  lines.push(`Audit:    .pi/subagent-tasks/${pool.id}/audit.jsonl`);
 
   // ── Finalize instructions ──
   lines.push(`Finalize: from your repo, e.g.  git merge --ff-only ${pool.branch}`);

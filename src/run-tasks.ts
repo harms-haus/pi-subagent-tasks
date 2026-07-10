@@ -341,7 +341,7 @@ async function runPool(params: Record<string, unknown>, rpc: RunPoolContext) {
       const restored = readState(poolDirPath);
       if (restored === undefined) {
         throw new Error(
-          `Pool "${resume}" not found at ${poolDirPath}. List pools with 'ls .pi/task-pools/' or inspect a pool with 'read .pi/task-pools/<id>/state.json'.`,
+          `Pool "${resume}" not found at ${poolDirPath}. List pools with 'ls .pi/subagent-tasks/' or inspect a pool with 'read .pi/subagent-tasks/<id>/state.json'.`,
         );
       }
       pool = restored;
@@ -569,7 +569,7 @@ async function runPool(params: Record<string, unknown>, rpc: RunPoolContext) {
         createdWts.push(poolWt);
         audit.log("worktree_created", { scope: "pool", path: poolWt.path });
 
-        // Ensure .pi/task-pools/ is excluded from tracking.
+        // Ensure .pi/subagent-tasks/ is excluded from tracking.
         await ensureExcludeEntry(git, cwd);
 
         // NOTE (H1 / D10 / §10.1): task worktrees are NOT created here.

@@ -1,5 +1,5 @@
 /**
- * pi-task-pools extension entry — factory for run_tasks + gate_verdict tools.
+ * pi-subagent-tasks extension entry — factory for run_tasks + gate_verdict tools.
  *
  * @module index
  *
@@ -43,7 +43,7 @@ let gitOpsCache: ReturnType<typeof createGitOps> | undefined = undefined;
 // ── Factory ──────────────────────────────────────────────────────────────────
 
 /**
- * Register all pi-task-pools tools and lifecycle handlers.
+ * Register all pi-subagent-tasks tools and lifecycle handlers.
  *
  * **Must be called once** by the host during extension initialisation.
  * Calling multiple times is idempotent — `pi.registerTool` and `pi.on`

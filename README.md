@@ -1,10 +1,10 @@
-# pi-task-pools
+# pi-subagent-tasks
 
 Autonomous multi-task pool orchestrator for the pi-coding-agent — define a pool of dependent tasks, and the extension orchestrates them end-to-end in isolated git worktrees under multi-dimensional concurrency limits.
 
 ## What it does
 
-`pi-task-pools` is a single pi-coding-agent extension that exposes **one tool** —
+`pi-subagent-tasks` is a single pi-coding-agent extension that exposes **one tool** —
 `run_tasks`. Calling it is a **blocking operation**: you hand it a pool of
 ordered, dependent tasks, and the extension autonomously drives the entire pool
 to completion before returning a summary. Internally it:
@@ -29,14 +29,14 @@ wisp DAGs — generalized into a single fire-and-forget tool call.
 
 ## Installation
 
-`pi-task-pools` is a [pi package](https://github.com/harms-haus/pi-task-pools).
+`pi-subagent-tasks` is a [pi package](https://github.com/harms-haus/pi-subagent-tasks).
 Install it as a pi extension in your project:
 
 ```bash
-pi install @harms-haus/pi-task-pools
+pi install @harms-haus/pi-subagent-tasks
 ```
 
-This registers the extension and its `task-pools` skill (auto-discovered by the
+This registers the extension and its `subagent-tasks` skill (auto-discovered by the
 agent). The `run_tasks` tool becomes available once the extension is loaded.
 
 ## Quick start
@@ -75,7 +75,7 @@ _after_ their parents merge, so they see the parents' code.
 ```
 
 `name` is slugified (kebab-case) into the **pool id**, the git branch
-(`pi-task-pool/<slug>`), and the on-disk directory. The tool blocks until the
+(`pi-subagent-task/<slug>`), and the on-disk directory. The tool blocks until the
 pool reaches a fixed point (all tasks done or failed), streaming the live board
 throughout. When it finishes it returns a summary with branch paths and session
 locations so you can finalize with plain `git`.
@@ -131,7 +131,7 @@ A task's `compose` field is a nested JSON tree of atoms. A bare task with no
 ```
 
 The full DSL reference, inter-atom result-flow rules, worked examples, and the
-retry/resume model are documented in the bundled skill (`task-pools`), which the
+retry/resume model are documented in the bundled skill (`subagent-tasks`), which the
 agent reads on demand.
 
 ## Concurrency limits
@@ -165,16 +165,16 @@ prioritizes parked tasks over ready ones so they reclaim the next freed slot.
 
 ## On-disk layout
 
-All pool state lives under `.pi/task-pools/<id>/` (primary source of truth,
+All pool state lives under `.pi/subagent-tasks/<id>/` (primary source of truth,
 durable and resumable):
 
 ```
-.pi/task-pools/<id>/
+.pi/subagent-tasks/<id>/
 ├── state.json        # canonical pool state — read to inspect a pool
 ├── audit.jsonl       # append-only event log
 ├── sessions/         # native pi session files, flat-named post-run
 ├── worktrees/
-│   ├── pool/         # pool worktree (branch: pi-task-pool/<slug>)
+│   ├── pool/         # pool worktree (branch: pi-subagent-task/<slug>)
 │   └── <taskId>/     # task worktree (deleted after merge)
 └── artifacts/        # agents are told to write run artifacts here
 ```
@@ -183,9 +183,9 @@ durable and resumable):
 the orchestrator agent's job using plain git:
 
 ```bash
-git merge --ff-only pi-task-pool/release-feature
+git merge --ff-only pi-subagent-task/release-feature
 # or
-gh pr create --head pi-task-pool/release-feature
+gh pr create --head pi-subagent-task/release-feature
 ```
 
 Inspect a pool with the `read` tool: `state.json` for status, `audit.jsonl` for

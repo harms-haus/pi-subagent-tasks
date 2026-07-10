@@ -161,7 +161,7 @@ function makeTask(overrides?: Partial<TaskRuntime>): TaskRuntime {
     retryCount: 0,
     runningAgentCount: 0,
     worktreePath: "/wt/t-1",
-    branch: "pi-task-pool/test/t-1",
+    branch: "pi-subagent-task/test/t-1",
     sessionFiles: [],
     downstreamCount: 0,
     ...overrides,
@@ -374,7 +374,7 @@ describe("FF success path", () => {
     await worker.processNext();
 
     // FF merge was attempted
-    expect(git.mergeFF).toHaveBeenCalledWith("pi-task-pool/test/t-1", "/wt/pool");
+    expect(git.mergeFF).toHaveBeenCalledWith("pi-subagent-task/test/t-1", "/wt/pool");
 
     // Success path: audit merge, remove worktree, audit deletion, re-FF pool
     expect(audit).toHaveBeenCalledWith("worktree_merged", { taskId: "t-1" });
@@ -384,7 +384,7 @@ describe("FF success path", () => {
       cwd: "/wt/pool",
     });
     expect(git.branchDelete).toHaveBeenCalledWith({
-      name: "pi-task-pool/test/t-1",
+      name: "pi-subagent-task/test/t-1",
       force: true,
       cwd: "/wt/pool",
     });
@@ -410,8 +410,16 @@ describe("FF success path", () => {
 
   it("handles processNext recursion via setTimeout correctly", async () => {
     const { opts, git, onMerged, getTask } = createBundle();
-    const task1 = makeTask({ id: "t-1", worktreePath: "/wt/t-1", branch: "pi-task-pool/test/t-1" });
-    const task2 = makeTask({ id: "t-2", worktreePath: "/wt/t-2", branch: "pi-task-pool/test/t-2" });
+    const task1 = makeTask({
+      id: "t-1",
+      worktreePath: "/wt/t-1",
+      branch: "pi-subagent-task/test/t-1",
+    });
+    const task2 = makeTask({
+      id: "t-2",
+      worktreePath: "/wt/t-2",
+      branch: "pi-subagent-task/test/t-2",
+    });
     getTask.mockImplementation((id: string) =>
       id === "t-1" ? task1 : id === "t-2" ? task2 : undefined,
     );
@@ -742,12 +750,12 @@ describe("serial queue behaviour", () => {
     const task1 = makeTask({
       id: "t-1",
       worktreePath: "/wt/t-1",
-      branch: "pi-task-pool/test/t-1",
+      branch: "pi-subagent-task/test/t-1",
     });
     const task2 = makeTask({
       id: "t-2",
       worktreePath: "/wt/t-2",
-      branch: "pi-task-pool/test/t-2",
+      branch: "pi-subagent-task/test/t-2",
     });
 
     // getTask returns the appropriate task based on id
@@ -784,7 +792,7 @@ describe("serial queue behaviour", () => {
     expect(git.mergeFF).toHaveBeenCalledTimes(2);
 
     // Tasks processed sequentially
-    expect(callOrder).toEqual(["pi-task-pool/test/t-1", "pi-task-pool/test/t-2"]);
+    expect(callOrder).toEqual(["pi-subagent-task/test/t-1", "pi-subagent-task/test/t-2"]);
   });
 
   it("does not overlap merges — second enqueued task waits for first to complete", async () => {
@@ -793,12 +801,12 @@ describe("serial queue behaviour", () => {
     const task1 = makeTask({
       id: "t-1",
       worktreePath: "/wt/t-1",
-      branch: "pi-task-pool/test/t-1",
+      branch: "pi-subagent-task/test/t-1",
     });
     const task2 = makeTask({
       id: "t-2",
       worktreePath: "/wt/t-2",
-      branch: "pi-task-pool/test/t-2",
+      branch: "pi-subagent-task/test/t-2",
     });
 
     getTask.mockImplementation((id: string) =>
@@ -827,7 +835,7 @@ describe("serial queue behaviour", () => {
     const mergeCalls: string[] = [];
     git.mergeFF = vi.fn().mockImplementation((branch: string) => {
       mergeCalls.push(branch);
-      if (branch === "pi-task-pool/test/t-1") return merge1Promise;
+      if (branch === "pi-subagent-task/test/t-1") return merge1Promise;
       return merge2Promise;
     });
 
@@ -861,7 +869,7 @@ describe("serial queue behaviour", () => {
       expect(onMerged).toHaveBeenCalledWith("t-2");
     });
 
-    expect(mergeCalls).toEqual(["pi-task-pool/test/t-1", "pi-task-pool/test/t-2"]);
+    expect(mergeCalls).toEqual(["pi-subagent-task/test/t-1", "pi-subagent-task/test/t-2"]);
   });
 });
 

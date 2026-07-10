@@ -1,5 +1,5 @@
 /**
- * Runtime constants for pi-task-pools.
+ * Runtime constants for pi-subagent-tasks.
  *
  * Defaults are confirmed in the spec decisions log (§4) and §17. Importing this
  * module is side-effect-free (plain declarations only).
@@ -31,13 +31,13 @@ export const DEFAULT_GATELOOP_MAX_ITERATIONS = 3;
 // ── Branching / layout (§17, §12) ────────────────────────────────────────────
 
 /** Pool/task branch prefix (§17.4). */
-export const BRANCH_PREFIX = "pi-task-pool";
+export const BRANCH_PREFIX = "pi-subagent-task";
 
 /** Primary on-disk state directory (relative to repo root, §12). */
-export const STATE_DIR_REL = ".pi/task-pools";
+export const STATE_DIR_REL = ".pi/subagent-tasks";
 
 /** Worktree directory fallback (inside the git dir, §10.5). */
-export const FALLBACK_WT_DIR_REL = ".git/pi-task-pools";
+export const FALLBACK_WT_DIR_REL = ".git/pi-subagent-tasks";
 
 // ── TUI (§13, §17.7) ─────────────────────────────────────────────────────────
 
@@ -76,7 +76,7 @@ export const AUDIT_FILE = "audit.jsonl";
 export const STATE_FILE = "state.json";
 
 /** Custom session-entry type registered via `pi.appendEntry` (§12). */
-export const CUSTOM_ENTRY_TYPE = "pi-task-pools";
+export const CUSTOM_ENTRY_TYPE = "pi-subagent-tasks";
 
 // ── Status lookup maps (§13, §5.2) ───────────────────────────────────────────
 

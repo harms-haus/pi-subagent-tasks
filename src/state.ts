@@ -1,5 +1,5 @@
 /**
- * State persistence for pi-task-pools — state.json + audit.jsonl + resume (§12, §15, D12).
+ * State persistence for pi-subagent-tasks — state.json + audit.jsonl + resume (§12, §15, D12).
  *
  * This module provides:
  *   - Atomic read/write of the pool state file (state.json).
@@ -96,7 +96,7 @@ let writeStateCounter = 0;
  * temp file is cleaned up to avoid orphans.
  *
  * @param poolDir  The pool's on-disk directory (e.g.
- *                 `<cwd>/.pi/task-pools/<poolId>`).
+ *                 `<cwd>/.pi/subagent-tasks/<poolId>`).
  * @param pool     The live pool state. Every task's cursor is serialized
  *                 losslessly via {@link serializeCursor}.
  */
@@ -263,7 +263,7 @@ export class AuditLogger {
 // ── Pool hint (§12) ──────────────────────────────────────────────────────────
 
 /**
- * Register a custom session entry of type `pi-task-pools` containing the pool
+ * Register a custom session entry of type `pi-subagent-tasks` containing the pool
  * id. This allows pi's session browser to discover that a pool exists and link
  * to it.
  *

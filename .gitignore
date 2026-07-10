@@ -13,8 +13,8 @@ coverage/
 .env.*
 !.env.example
 
-# pi-task-pools runtime artifacts
-.pi/task-pools/
+# pi-subagent-tasks runtime artifacts
+.pi/subagent-tasks/
 
 # OS files
 .DS_Store

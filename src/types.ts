@@ -1,5 +1,5 @@
 /**
- * Core type definitions for pi-task-pools.
+ * Core type definitions for pi-subagent-tasks.
  *
  * This module is TYPE-ONLY — it contains no runtime code. Every other module
  * in the extension imports its domain model from here.

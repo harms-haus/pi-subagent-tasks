@@ -56,7 +56,7 @@ const TEMP_DIRS: string[] = [];
  * cleanup in afterAll.
  */
 function createTempRepo(): string {
-  const dir = mkdtempSync(join(tmpdir(), "pi-task-pools-int-"));
+  const dir = mkdtempSync(join(tmpdir(), "pi-subagent-tasks-int-"));
   TEMP_DIRS.push(dir);
   execSync("git init", { cwd: dir, stdio: "pipe" });
   execSync('git config user.email "test@test.com"', { cwd: dir, stdio: "pipe" });
@@ -375,7 +375,7 @@ describe("integration tests (compose engine e2e)", () => {
     // N6 (§15): task_skipped audit events emitted for propagated tasks
     // so the audit log can distinguish a genuine failure from a transitive
     // skip. Read audit.jsonl and verify the events were written.
-    const auditPath = join(cwd, ".pi", "task-pools", "failure-prop", "audit.jsonl");
+    const auditPath = join(cwd, ".pi", "subagent-tasks", "failure-prop", "audit.jsonl");
     const auditContent = readFileSync(auditPath, "utf-8");
     const auditLines = auditContent
       .trim()
@@ -657,7 +657,7 @@ describe("integration tests (compose engine e2e)", () => {
     expect(text1).toContain("2 done");
 
     // Verify state.json exists on disk.
-    const stateFile = join(cwd, ".pi", "task-pools", "resume-me", "state.json");
+    const stateFile = join(cwd, ".pi", "subagent-tasks", "resume-me", "state.json");
     expect(existsSync(stateFile)).toBe(true);
 
     // Step 2: Create a fresh tool instance and resume the same pool.
@@ -705,7 +705,7 @@ describe("integration tests (compose engine e2e)", () => {
     expect(text1).toContain("1 done");
 
     // Verify state.json exists on disk.
-    const stateFile = join(cwd, ".pi", "task-pools", "mid-merge", "state.json");
+    const stateFile = join(cwd, ".pi", "subagent-tasks", "mid-merge", "state.json");
     expect(existsSync(stateFile)).toBe(true);
 
     // Step 2: Simulate an abort in the merge window. Read the persisted
@@ -912,7 +912,7 @@ function makeSmokeTask(id: string, status: Status): TaskRuntime {
     retryCount: 0,
     runningAgentCount: 0,
     worktreePath: `/tmp/wt/${id}`,
-    branch: `pi-task-pool/${id}`,
+    branch: `pi-subagent-task/${id}`,
     sessionFiles: [],
     downstreamCount: 0,
   };
@@ -923,8 +923,8 @@ function makeSmokePool(tasks: TaskRuntime[]): PoolState {
   return {
     id: "smoke-pool",
     name: "Smoke Pool",
-    branch: "pi-task-pool/smoke",
-    poolWorktree: "/tmp/pi-task-pool/smoke",
+    branch: "pi-subagent-task/smoke",
+    poolWorktree: "/tmp/pi-subagent-task/smoke",
     baseBranch: "main",
     limits: { total: 4, provider: {}, model: {} },
     maxRetries: 2,

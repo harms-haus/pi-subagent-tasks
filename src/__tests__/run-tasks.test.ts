@@ -72,8 +72,8 @@ import * as profilesModule from "../profiles";
 const MINIMAL_POOL_STATE: PoolState = {
   id: "my-pool",
   name: "My Pool",
-  branch: "pi-task-pool/my-pool",
-  poolWorktree: "/test/repo/.pi/task-pools/my-pool/worktrees/pool",
+  branch: "pi-subagent-task/my-pool",
+  poolWorktree: "/test/repo/.pi/subagent-tasks/my-pool/worktrees/pool",
   baseBranch: "main",
   limits: { total: 4, provider: {}, model: {} },
   maxRetries: 2,
@@ -241,11 +241,11 @@ describe("run_tasks tool", () => {
     (worktreesModule.canUseWorktrees as ReturnType<typeof vi.fn>).mockResolvedValue(true);
     (worktreesModule.createPoolWorktree as ReturnType<typeof vi.fn>).mockResolvedValue({
       path: "/mock/pool-worktree",
-      branch: "pi-task-pool/my-pool",
+      branch: "pi-subagent-task/my-pool",
     });
     (worktreesModule.createTaskWorktree as ReturnType<typeof vi.fn>).mockResolvedValue({
       path: "/mock/task-worktree",
-      branch: "pi-task-pool/my-pool/t-1",
+      branch: "pi-subagent-task/my-pool/t-1",
     });
 
     // Build tool with mocks.
@@ -745,7 +745,7 @@ describe("run_tasks tool", () => {
     });
     (worktreesModule.createTaskWorktree as ReturnType<typeof vi.fn>).mockResolvedValue({
       path: "/new/task-worktree",
-      branch: "pi-task-pool/my-pool/t-1",
+      branch: "pi-subagent-task/my-pool/t-1",
     });
 
     const ctx = createMockContext();

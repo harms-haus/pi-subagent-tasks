@@ -2,7 +2,7 @@
  * Compose execution cursor — build, serialize, and walk (§7.2, §5.4, §12).
  *
  * The cursor is a per-task execution-state tree that mirrors a task's
- * {@link ComposeAtom} tree. Where wisp flattens work into a DAG, pi-task-pools
+ * {@link ComposeAtom} tree. Where wisp flattens work into a DAG, pi-subagent-tasks
  * walks a TREE: one {@link CursorNode} per atom node, with recursive
  * sub-cursors modeling container atoms (`sequential`/`parallel` get `children`;
  * `gateLoop` gets `workCursor`/`reviewCursor`; `loop` gets `childCursor`).

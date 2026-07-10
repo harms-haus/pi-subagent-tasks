@@ -1,5 +1,5 @@
 /**
- * Native session-file management for pi-task-pools.
+ * Native session-file management for pi-subagent-tasks.
  *
  * Handles the dual-search pattern for finding session files (flat vs. nested
  * `--<cwd>--` form), renaming raw pi output to canonical names, building

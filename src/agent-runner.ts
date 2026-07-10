@@ -1,5 +1,5 @@
 /**
- * Real AgentRunner adapter for pi-task-pools.
+ * Real AgentRunner adapter for pi-subagent-tasks.
  *
  * @module agent-runner
  *

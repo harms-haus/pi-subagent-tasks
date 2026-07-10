@@ -64,7 +64,7 @@ function makePoolState(overrides?: Partial<PoolState>): PoolState {
   return {
     id: "test-pool",
     name: "Test Pool",
-    branch: "pi-task-pool/test",
+    branch: "pi-subagent-task/test",
     poolWorktree: "/wt/pool",
     baseBranch: "main",
     limits: { total: 4, provider: {}, model: {} },
@@ -96,11 +96,11 @@ describe("createPoolWorktree", () => {
 
     const result = await createPoolWorktree(git, "/repo", "pool-1", "my-pool", "main-sha");
 
-    expect(result.path).toBe("/repo/.pi/task-pools/pool-1/worktrees/pool");
-    expect(result.branch).toBe("pi-task-pool/my-pool");
+    expect(result.path).toBe("/repo/.pi/subagent-tasks/pool-1/worktrees/pool");
+    expect(result.branch).toBe("pi-subagent-task/my-pool");
     expect(git.worktreeAdd).toHaveBeenCalledWith({
-      path: "/repo/.pi/task-pools/pool-1/worktrees/pool",
-      branch: "pi-task-pool/my-pool",
+      path: "/repo/.pi/subagent-tasks/pool-1/worktrees/pool",
+      branch: "pi-subagent-task/my-pool",
       startPoint: "main-sha",
       cwd: "/repo",
     });
@@ -111,8 +111,8 @@ describe("createPoolWorktree", () => {
 
     const { path, branch } = await createPoolWorktree(git, "/repo", "p1", "slug", "head");
 
-    expect(path).toContain("/repo/.pi/task-pools/p1/worktrees/pool");
-    expect(branch).toBe("pi-task-pool/slug");
+    expect(path).toContain("/repo/.pi/subagent-tasks/p1/worktrees/pool");
+    expect(branch).toBe("pi-subagent-task/slug");
   });
 });
 
@@ -129,11 +129,11 @@ describe("createTaskWorktree", () => {
       "pool-head-sha",
     );
 
-    expect(result.path).toBe("/repo/.pi/task-pools/pool-1/worktrees/t-1");
-    expect(result.branch).toBe("pi-task-pool/my-pool/t-1");
+    expect(result.path).toBe("/repo/.pi/subagent-tasks/pool-1/worktrees/t-1");
+    expect(result.branch).toBe("pi-subagent-task/my-pool/t-1");
     expect(git.worktreeAdd).toHaveBeenCalledWith({
-      path: "/repo/.pi/task-pools/pool-1/worktrees/t-1",
-      branch: "pi-task-pool/my-pool/t-1",
+      path: "/repo/.pi/subagent-tasks/pool-1/worktrees/t-1",
+      branch: "pi-subagent-task/my-pool/t-1",
       startPoint: "pool-head-sha",
       cwd: "/repo",
     });
@@ -167,7 +167,7 @@ describe("removeTaskWorktree", () => {
       return { stdout: "", stderr: "", code: 0, killed: false };
     });
 
-    await removeTaskWorktree(git, "/wt/t-1", "pi-task-pool/slug/t-1", "/repo");
+    await removeTaskWorktree(git, "/wt/t-1", "pi-subagent-task/slug/t-1", "/repo");
 
     expect(order).toEqual(["worktreeRemove", "branchDelete", "worktreePrune"]);
   });
@@ -175,7 +175,7 @@ describe("removeTaskWorktree", () => {
   it("passes force:true and cwd to worktreeRemove", async () => {
     const git = createMockGitOps();
 
-    await removeTaskWorktree(git, "/wt/t-1", "pi-task-pool/slug/t-1", "/repo");
+    await removeTaskWorktree(git, "/wt/t-1", "pi-subagent-task/slug/t-1", "/repo");
 
     expect(git.worktreeRemove).toHaveBeenCalledWith({
       path: "/wt/t-1",
@@ -187,10 +187,10 @@ describe("removeTaskWorktree", () => {
   it("passes force:true and cwd to branchDelete", async () => {
     const git = createMockGitOps();
 
-    await removeTaskWorktree(git, "/wt/t-1", "pi-task-pool/slug/t-1", "/repo");
+    await removeTaskWorktree(git, "/wt/t-1", "pi-subagent-task/slug/t-1", "/repo");
 
     expect(git.branchDelete).toHaveBeenCalledWith({
-      name: "pi-task-pool/slug/t-1",
+      name: "pi-subagent-task/slug/t-1",
       force: true,
       cwd: "/repo",
     });
@@ -199,7 +199,7 @@ describe("removeTaskWorktree", () => {
   it("works without cwd", async () => {
     const git = createMockGitOps();
 
-    await removeTaskWorktree(git, "/wt/t-1", "pi-task-pool/slug/t-1");
+    await removeTaskWorktree(git, "/wt/t-1", "pi-subagent-task/slug/t-1");
 
     expect(git.worktreeRemove).toHaveBeenCalledWith({
       path: "/wt/t-1",
@@ -207,7 +207,7 @@ describe("removeTaskWorktree", () => {
       cwd: undefined,
     });
     expect(git.branchDelete).toHaveBeenCalledWith({
-      name: "pi-task-pool/slug/t-1",
+      name: "pi-subagent-task/slug/t-1",
       force: true,
       cwd: undefined,
     });
@@ -226,7 +226,7 @@ describe("ensureExcludeEntry", () => {
     removeTempDir(tmpDir);
   });
 
-  it("appends .pi/task-pools/ to info/exclude when file exists without it", async () => {
+  it("appends .pi/subagent-tasks/ to info/exclude when file exists without it", async () => {
     const git = createMockGitOps();
 
     // gitExec returns the temp dir as the common git dir
@@ -246,7 +246,7 @@ describe("ensureExcludeEntry", () => {
     await ensureExcludeEntry(git, "/repo");
 
     const content = readFileSync(excludeFile, "utf-8");
-    expect(content).toBe("# git exclude\n\n.pi/task-pools/\n");
+    expect(content).toBe("# git exclude\n\n.pi/subagent-tasks/\n");
   });
 
   it("creates info/exclude when it does not exist", async () => {
@@ -264,7 +264,7 @@ describe("ensureExcludeEntry", () => {
     const excludeFile = join(tmpDir, "info", "exclude");
     expect(existsSync(excludeFile)).toBe(true);
     const content = readFileSync(excludeFile, "utf-8");
-    expect(content).toBe("\n.pi/task-pools/\n");
+    expect(content).toBe("\n.pi/subagent-tasks/\n");
   });
 
   it("is idempotent — does not append when entry already present", async () => {
@@ -280,13 +280,13 @@ describe("ensureExcludeEntry", () => {
     const excludeDir = join(tmpDir, "info");
     mkdirSync(excludeDir, { recursive: true });
     const excludeFile = join(excludeDir, "exclude");
-    writeFileSync(excludeFile, ".pi/task-pools/\n", "utf-8");
+    writeFileSync(excludeFile, ".pi/subagent-tasks/\n", "utf-8");
 
     // First call — entry already present, should be a no-op.
     await ensureExcludeEntry(git, "/repo");
 
     const content = readFileSync(excludeFile, "utf-8");
-    expect(content).toBe(".pi/task-pools/\n");
+    expect(content).toBe(".pi/subagent-tasks/\n");
     expect(content.split("\n").filter(Boolean)).toHaveLength(1);
   });
 
@@ -381,8 +381,8 @@ describe("verifyWorktrees", () => {
       {
         path: "/wt/t-1",
         head: "bbb",
-        branch: "refs/heads/pi-task-pool/slug/t-1",
-        branchName: "pi-task-pool/slug/t-1",
+        branch: "refs/heads/pi-subagent-task/slug/t-1",
+        branchName: "pi-subagent-task/slug/t-1",
       },
     ]);
     // merge-base --is-ancestor exits 0 → pool HEAD IS ancestor → NOT stale.
@@ -402,7 +402,7 @@ describe("verifyWorktrees", () => {
           retryCount: 0,
           runningAgentCount: 0,
           worktreePath: "/wt/t-1",
-          branch: "pi-task-pool/slug/t-1",
+          branch: "pi-subagent-task/slug/t-1",
           sessionFiles: [],
           downstreamCount: 0,
         },
@@ -436,7 +436,7 @@ describe("verifyWorktrees", () => {
           retryCount: 0,
           runningAgentCount: 0,
           worktreePath: "/wt/t-1",
-          branch: "pi-task-pool/slug/t-1",
+          branch: "pi-subagent-task/slug/t-1",
           sessionFiles: [],
           downstreamCount: 0,
         },
@@ -452,7 +452,7 @@ describe("verifyWorktrees", () => {
           retryCount: 0,
           runningAgentCount: 0,
           worktreePath: "/wt/t-2",
-          branch: "pi-task-pool/slug/t-2",
+          branch: "pi-subagent-task/slug/t-2",
           sessionFiles: [],
           downstreamCount: 0,
         },
@@ -487,7 +487,7 @@ describe("verifyWorktrees", () => {
           retryCount: 0,
           runningAgentCount: 0,
           worktreePath: null,
-          branch: "pi-task-pool/slug/t-1",
+          branch: "pi-subagent-task/slug/t-1",
           sessionFiles: [],
           downstreamCount: 0,
         },
@@ -503,7 +503,7 @@ describe("verifyWorktrees", () => {
           retryCount: 0,
           runningAgentCount: 0,
           worktreePath: "/wt/t-2",
-          branch: "pi-task-pool/slug/t-2",
+          branch: "pi-subagent-task/slug/t-2",
           sessionFiles: [],
           downstreamCount: 0,
         },
@@ -535,8 +535,8 @@ describe("verifyWorktrees", () => {
       {
         path: "/wt/t-1",
         head: "taskHEAD",
-        branch: "refs/heads/pi-task-pool/slug/t-1",
-        branchName: "pi-task-pool/slug/t-1",
+        branch: "refs/heads/pi-subagent-task/slug/t-1",
+        branchName: "pi-subagent-task/slug/t-1",
       },
     ]);
     // merge-base --is-ancestor exits 1 → pool HEAD is NOT an ancestor → stale.
@@ -557,7 +557,7 @@ describe("verifyWorktrees", () => {
           retryCount: 0,
           runningAgentCount: 0,
           worktreePath: "/wt/t-1",
-          branch: "pi-task-pool/slug/t-1",
+          branch: "pi-subagent-task/slug/t-1",
           sessionFiles: [],
           downstreamCount: 0,
         },
@@ -582,8 +582,8 @@ describe("verifyWorktrees", () => {
       {
         path: "/wt/t-1",
         head: "taskHEAD",
-        branch: "refs/heads/pi-task-pool/slug/t-1",
-        branchName: "pi-task-pool/slug/t-1",
+        branch: "refs/heads/pi-subagent-task/slug/t-1",
+        branchName: "pi-subagent-task/slug/t-1",
       },
     ]);
     // merge-base --is-ancestor exits 0 → pool HEAD IS ancestor → fresh.
@@ -604,7 +604,7 @@ describe("verifyWorktrees", () => {
           retryCount: 0,
           runningAgentCount: 0,
           worktreePath: "/wt/t-1",
-          branch: "pi-task-pool/slug/t-1",
+          branch: "pi-subagent-task/slug/t-1",
           sessionFiles: [],
           downstreamCount: 0,
         },
@@ -625,8 +625,8 @@ describe("verifyWorktrees", () => {
       {
         path: "/wt/t-stale",
         head: "staleHEAD",
-        branch: "refs/heads/pi-task-pool/slug/t-stale",
-        branchName: "pi-task-pool/slug/t-stale",
+        branch: "refs/heads/pi-subagent-task/slug/t-stale",
+        branchName: "pi-subagent-task/slug/t-stale",
       },
     ]);
     git.gitExec = vi.fn().mockResolvedValue({ stdout: "", stderr: "", code: 1, killed: false });
@@ -646,7 +646,7 @@ describe("verifyWorktrees", () => {
           retryCount: 0,
           runningAgentCount: 0,
           worktreePath: "/wt/t-missing",
-          branch: "pi-task-pool/slug/t-missing",
+          branch: "pi-subagent-task/slug/t-missing",
           sessionFiles: [],
           downstreamCount: 0,
         },
@@ -662,7 +662,7 @@ describe("verifyWorktrees", () => {
           retryCount: 0,
           runningAgentCount: 0,
           worktreePath: "/wt/t-stale",
-          branch: "pi-task-pool/slug/t-stale",
+          branch: "pi-subagent-task/slug/t-stale",
           sessionFiles: [],
           downstreamCount: 0,
         },
@@ -699,7 +699,7 @@ describe("verifyWorktrees", () => {
           retryCount: 0,
           runningAgentCount: 0,
           worktreePath: "/wt/t-1",
-          branch: "pi-task-pool/slug/t-1",
+          branch: "pi-subagent-task/slug/t-1",
           sessionFiles: [],
           downstreamCount: 0,
         },

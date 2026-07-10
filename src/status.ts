@@ -1,5 +1,5 @@
 /**
- * Status state machine and failure propagation for pi-task-pools.
+ * Status state machine and failure propagation for pi-subagent-tasks.
  *
  * Pure functions that operate on the task-status domain model (§5.2). Every
  * function is synchronous and side-effect-free (no IO, no mutation beyond the

@@ -143,7 +143,7 @@ describe("poolDir", () => {
     );
   });
 
-  it("uses the STATE_DIR_REL constant (.pi/task-pools)", () => {
-    expect(poolDir("/repo", "x")).toBe("/repo/.pi/task-pools/x");
+  it("uses the STATE_DIR_REL constant (.pi/subagent-tasks)", () => {
+    expect(poolDir("/repo", "x")).toBe("/repo/.pi/subagent-tasks/x");
   });
 });

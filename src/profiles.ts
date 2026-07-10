@@ -1,6 +1,6 @@
 /**
  * Profile loading, CLI-arg construction, and profile resolution for
- * pi-task-pools.
+ * pi-subagent-tasks.
  *
  * @module profiles
  *

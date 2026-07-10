@@ -1,12 +1,12 @@
 {
-  "name": "@harms-haus/pi-task-pools",
+  "name": "@harms-haus/pi-subagent-tasks",
   "version": "0.1.0",
   "description": "pi-coding-agent extension: autonomous multi-task pool orchestrator with worktree isolation, concurrency limits, and a live TUI board",
   "type": "module",
   "main": "src/index.ts",
   "keywords": [
     "pi-package",
-    "task-pools"
+    "subagent-tasks"
   ],
   "license": "MIT",
   "engines": {
@@ -24,7 +24,7 @@
       "./src/index.ts"
     ],
     "skills": [
-      "./skills/task-pools"
+      "./skills/subagent-tasks"
     ]
   },
   "dependencies": {

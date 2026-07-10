@@ -1,5 +1,5 @@
 ---
-name: task-pools
+name: subagent-tasks
 description: >-
   Orchestrate a pool of dependent tasks that run autonomously in isolated git
   worktrees under multi-dimensional concurrency limits, with a live board. Use
@@ -7,9 +7,9 @@ description: >-
   Replaces ad-hoc delegate_to_subagents / kanban / workflow patterns.
 ---
 
-# pi-task-pools — `run_tasks` Skill
+# pi-subagent-tasks — `run_tasks` Skill
 
-This skill teaches how to use **pi-task-pools**, a pi-coding-agent extension
+This skill teaches how to use **pi-subagent-tasks**, a pi-coding-agent extension
 that provides one tool (`run_tasks`) for defining and autonomously orchestrating
 a pool of dependent tasks. Tasks run in isolated git worktrees, merge serially
 back into a shared pool branch, and are subject to multi-dimensional concurrency
@@ -149,7 +149,7 @@ unless every atom in its compose tree specifies one.
 <!-- prettier-ignore-end -->
 
 - `name` is slugified (kebab-case) to become the **pool id**, the git branch
-  (`pi-task-pool/<slug>`), and the on-disk directory name.
+  (`pi-subagent-task/<slug>`), and the on-disk directory name.
 - `dependsOn` is resolved against task `id`s and `title`s at creation. An
   unresolved reference is a hard error.
 - If a pool id already exists on disk and no `resume` is given, `run_tasks`
@@ -445,14 +445,14 @@ over `ready` ones so they get the next freed slot.
 ### Layout
 
 ```
-.pi/task-pools/<id>/
+.pi/subagent-tasks/<id>/
 ├── state.json              # canonical pool state (JSON)
 ├── audit.jsonl             # append-only event log
 ├── sessions/               # native pi session files, flat-named post-run
 │   └── 20260709T151730Z-tests.jsonl
 ├── worktrees/
-│   ├── pool/               # pool worktree (branch: pi-task-pool/<slug>)
-│   ├── <taskId>/           # task worktree (branch: pi-task-pool/<slug>/<taskId>)
+│   ├── pool/               # pool worktree (branch: pi-subagent-task/<slug>)
+│   ├── <taskId>/           # task worktree (branch: pi-subagent-task/<slug>/<taskId>)
 │   └── ...
 └── artifacts/              # agents are told to write run artifacts here
 ```
@@ -464,10 +464,10 @@ orchestrator agent's job using plain git tools. After the pool completes:
 
 ```bash
 # Fast-forward merge (if possible, recommended):
-git merge --ff-only pi-task-pool/<slug>
+git merge --ff-only pi-subagent-task/<slug>
 
 # Or create a PR:
-gh pr create --head pi-task-pool/<slug>
+gh pr create --head pi-subagent-task/<slug>
 ```
 
 The `state.json` file records `baseBranch` (the repo branch at pool creation)
@@ -478,11 +478,11 @@ so you know the merge target.
 Since `run_tasks` is the only tool, inspect pools with the pi `read` tool
 (not a shell builtin — use it as a pi tool invocation):
 
-- Read the pool summary: `read .pi/task-pools/<id>/state.json`
-- Read the event log: `read .pi/task-pools/<id>/audit.jsonl`
-- List session files: `ls .pi/task-pools/<id>/sessions/`
+- Read the pool summary: `read .pi/subagent-tasks/<id>/state.json`
+- Read the event log: `read .pi/subagent-tasks/<id>/audit.jsonl`
+- List session files: `ls .pi/subagent-tasks/<id>/sessions/`
 - Read a specific agent's transcript:
-  `read .pi/task-pools/<id>/sessions/20260709T151730Z-tests.jsonl`
+  `read .pi/subagent-tasks/<id>/sessions/20260709T151730Z-tests.jsonl`
 
 ### Final summary format
 
@@ -491,17 +491,17 @@ returns a plain-text summary:
 
 ```
 Pool: release-feature  (id: release-feature)
-Pool branch: pi-task-pool/release-feature   (worktree: .pi/task-pools/release-feature/worktrees/pool)
+Pool branch: pi-subagent-task/release-feature   (worktree: .pi/subagent-tasks/release-feature/worktrees/pool)
 Tasks: 3 done, 1 failed, 1 skipped
   ✓ plan        (session: …/sessions/…-plan.jsonl)
   ✓ tests       (session: …/sessions/…-tests.jsonl)
   ✓ code        (session: …/sessions/…-code.jsonl)
   ✗ docs        FAILED after 3 attempts — <reason>  (resume to retry)
   ⊘ deploy      SKIPPED (depends on failed: docs)
-Sessions: .pi/task-pools/release-feature/sessions/
-Audit:    .pi/task-pools/release-feature/audit.jsonl
-Finalize: from your repo, e.g.  git merge --ff-only pi-task-pool/release-feature
-                              | gh pr create --head pi-task-pool/release-feature
+Sessions: .pi/subagent-tasks/release-feature/sessions/
+Audit:    .pi/subagent-tasks/release-feature/audit.jsonl
+Finalize: from your repo, e.g.  git merge --ff-only pi-subagent-task/release-feature
+                              | gh pr create --head pi-subagent-task/release-feature
 ```
 
 ## Retry, failure, and resume behavior

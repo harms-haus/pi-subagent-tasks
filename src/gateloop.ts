@@ -1,5 +1,5 @@
 /**
- * gateLoop verdict handling logic for pi-task-pools (§9, D8).
+ * gateLoop verdict handling logic for pi-subagent-tasks (§9, D8).
  *
  * This module is the standalone gateLoop advance handler. It is NOT imported
  * by {@link atoms.ts} directly — instead, it is wired in via the injected

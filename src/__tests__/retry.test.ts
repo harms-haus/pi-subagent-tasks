@@ -23,7 +23,7 @@ function task(cursor: CursorNode, overrides?: Partial<TaskRuntime>): TaskRuntime
     retryCount: 0,
     runningAgentCount: 0,
     worktreePath: "/tmp/worktree",
-    branch: "pi-task-pool/test/t-1",
+    branch: "pi-subagent-task/test/t-1",
     sessionFiles: [],
     downstreamCount: 0,
     ...overrides,
@@ -35,7 +35,7 @@ function pool(tasks: TaskRuntime[], overrides?: Partial<PoolState>): PoolState {
   return {
     id: "pool-1",
     name: "Test Pool",
-    branch: "pi-task-pool/test",
+    branch: "pi-subagent-task/test",
     poolWorktree: "/tmp/pool-wt",
     baseBranch: "main",
     limits: { total: 4, provider: {}, model: {} },

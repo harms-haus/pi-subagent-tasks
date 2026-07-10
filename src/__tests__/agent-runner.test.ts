@@ -565,7 +565,7 @@ describe("createRealAgentRunner", () => {
   it("uses process.execPath + argv[1] when argv[1] is a real fs path", async () => {
     const origArgv1 = process.argv[1] as string;
     // argv[1] must be a real filesystem path for the node heuristic tier
-    const testEntry = join(tmpdir(), `pi-task-pools-entry-${Date.now()}.js`);
+    const testEntry = join(tmpdir(), `pi-subagent-tasks-entry-${Date.now()}.js`);
     writeFileSync(testEntry, "");
     process.argv[1] = testEntry;
     try {

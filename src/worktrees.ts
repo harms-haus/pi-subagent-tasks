@@ -1,5 +1,5 @@
 /**
- * Worktree lifecycle management for pi-task-pools.
+ * Worktree lifecycle management for pi-subagent-tasks.
  *
  * Handles creation, removal, and verification of pool & task worktrees,
  * plus the `.git/info/exclude` guard (§10.1, §10.4, §10.5).
@@ -23,8 +23,8 @@ import { poolDir } from "./utils";
 /**
  * Create the single pool worktree.
  *
- * Path: `<cwd>/.pi/task-pools/<poolId>/worktrees/pool`
- * Branch: `pi-task-pool/<slug>`
+ * Path: `<cwd>/.pi/subagent-tasks/<poolId>/worktrees/pool`
+ * Branch: `pi-subagent-task/<slug>`
  *
  * The pool worktree is created once per pool and persists for the pool's
  * lifetime. It shares the common `.git/` directory with the primary working
@@ -48,8 +48,8 @@ export async function createPoolWorktree(
 /**
  * Create a task-specific worktree.
  *
- * Path: `<cwd>/.pi/task-pools/<poolId>/worktrees/<taskId>`
- * Branch: `pi-task-pool/<slug>/<taskId>`
+ * Path: `<cwd>/.pi/subagent-tasks/<poolId>/worktrees/<taskId>`
+ * Branch: `pi-subagent-task/<slug>/<taskId>`
  *
  * Task worktrees are ephemeral: they exist only while the task is running
  * and are removed when the task reaches a terminal state (§10.4).
@@ -97,19 +97,19 @@ export async function removeTaskWorktree(
 // ── .git/info/exclude guard (§10.5) ──────────────────────────────────────────
 
 /**
- * Ensure the repository's `info/exclude` contains a `.pi/task-pools/` entry.
+ * Ensure the repository's `info/exclude` contains a `.pi/subagent-tasks/` entry.
  *
  * Git worktrees that are _nested_ inside the main working tree (always the
- * case for pi-task-pools) must be excluded from the main tree's tracking so
+ * case for pi-subagent-tasks) must be excluded from the main tree's tracking so
  * that `git status` on the primary working tree does not show the pool
  * directories as untracked content.
  *
  * The approach:
  * 1. Resolve the common git directory via `git rev-parse --git-common-dir`.
  * 2. Read `<commonDir>/info/exclude` (if it exists).
- * 3. If a line containing `.pi/task-pools/` is already present, return
+ * 3. If a line containing `.pi/subagent-tasks/` is already present, return
  *    immediately (idempotent).
- * 4. Otherwise, append `\n.pi/task-pools/\n` to the file.
+ * 4. Otherwise, append `\n.pi/subagent-tasks/\n` to the file.
  *
  * This is a LOCAL-only operation — the exclude file is private to the clone
  * and never committed.
@@ -123,7 +123,7 @@ export async function ensureExcludeEntry(git: GitOps, cwd: string): Promise<void
 
   if (existsSync(excludePath)) {
     const content = readFileSync(excludePath, "utf-8");
-    if (content.includes(".pi/task-pools/")) {
+    if (content.includes(".pi/subagent-tasks/")) {
       return; // Already present — idempotent.
     }
   }
@@ -133,7 +133,7 @@ export async function ensureExcludeEntry(git: GitOps, cwd: string): Promise<void
   mkdirSync(dirname(excludePath), { recursive: true });
 
   // Append the exclusion pattern.
-  appendFileSync(excludePath, "\n.pi/task-pools/\n", "utf-8");
+  appendFileSync(excludePath, "\n.pi/subagent-tasks/\n", "utf-8");
 }
 
 // ── Detection helpers ────────────────────────────────────────────────────────

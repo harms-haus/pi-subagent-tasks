@@ -107,7 +107,7 @@ function makePoolState(tasks: TaskRuntime[]): PoolState {
   return {
     id: "test-pool",
     name: "Test Pool",
-    branch: "pi-task-pool/test-pool",
+    branch: "pi-subagent-task/test-pool",
     poolWorktree: "/tmp/test-pool-wt",
     baseBranch: "main",
     limits: { total: 4, provider: {}, model: {} },

@@ -1,5 +1,5 @@
 /**
- * Pure DAG helpers for pi-task-pools.
+ * Pure DAG helpers for pi-subagent-tasks.
  *
  * Every function here is PURE: no I/O, no globals, deterministic output. They
  * operate over the minimal structural shape a task exposes for dependency

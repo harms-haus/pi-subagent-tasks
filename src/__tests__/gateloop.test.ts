@@ -24,7 +24,7 @@ function task(overrides?: Partial<TaskRuntime>): TaskRuntime {
     retryCount: 0,
     runningAgentCount: 0,
     worktreePath: "/tmp/worktree",
-    branch: "pi-task-pool/test/t-1",
+    branch: "pi-subagent-task/test/t-1",
     sessionFiles: [],
     downstreamCount: 0,
     ...overrides,

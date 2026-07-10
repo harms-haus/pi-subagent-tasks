@@ -38,8 +38,8 @@ function makePool(tasks: TaskRuntime[], overrides?: Partial<PoolState>): PoolSta
   return {
     id: "test-pool",
     name: "Test Pool",
-    branch: "pi-task-pool/test-pool",
-    poolWorktree: "/tmp/pi-task-pool/test-pool",
+    branch: "pi-subagent-task/test-pool",
+    poolWorktree: "/tmp/pi-subagent-task/test-pool",
     baseBranch: "main",
     limits: { total: 4, provider: {}, model: {} },
     maxRetries: 2,
@@ -68,7 +68,7 @@ function makeTask(id: string, status: Status, overrides?: Partial<TaskRuntime>):
     retryCount: 0,
     runningAgentCount: 0,
     worktreePath: `/tmp/wt/${id}`,
-    branch: `pi-task-pool/${id}`,
+    branch: `pi-subagent-task/${id}`,
     sessionFiles: [],
     downstreamCount: 0,
     lastError: undefined,
@@ -344,7 +344,7 @@ describe("renderSummary", () => {
     const pool = makePool([t1, t2, t3, t4], {
       id: "my-pool",
       name: "My Pool",
-      branch: "pi-task-pool/my-pool",
+      branch: "pi-subagent-task/my-pool",
     });
 
     const result = renderSummary(pool);
@@ -358,7 +358,7 @@ describe("renderSummary", () => {
 
     // ── Line-by-line assertions ──
     expect(lines[0]).toBe("Pool: My Pool  (id: my-pool)");
-    expect(lines[1]).toMatch(/^Pool branch: pi-task-pool\/my-pool {3}\(worktree: /);
+    expect(lines[1]).toMatch(/^Pool branch: pi-subagent-task\/my-pool {3}\(worktree: /);
     expect(lines[2]).toBe("Tasks: 2 done, 1 failed, 1 skipped");
 
     // Done tasks.
@@ -374,15 +374,15 @@ describe("renderSummary", () => {
     expect(lines[6]).toBe("  ⊘ t-deploy  SKIPPED (depends on failed: t-build)");
 
     // Paths.
-    expect(lines[7]).toBe("Sessions: .pi/task-pools/my-pool/sessions/");
-    expect(lines[8]).toBe("Audit:    .pi/task-pools/my-pool/audit.jsonl");
+    expect(lines[7]).toBe("Sessions: .pi/subagent-tasks/my-pool/sessions/");
+    expect(lines[8]).toBe("Audit:    .pi/subagent-tasks/my-pool/audit.jsonl");
 
     // Finalize.
     expect(lines[9]).toBe(
-      "Finalize: from your repo, e.g.  git merge --ff-only pi-task-pool/my-pool",
+      "Finalize: from your repo, e.g.  git merge --ff-only pi-subagent-task/my-pool",
     );
     expect(lines[10]).toBe(
-      "                              | gh pr create --head pi-task-pool/my-pool",
+      "                              | gh pr create --head pi-subagent-task/my-pool",
     );
   });
 
