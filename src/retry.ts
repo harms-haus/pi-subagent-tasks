@@ -23,7 +23,7 @@
  */
 
 import { SOFT_RETRY_CAP } from "./constants";
-import { getCursorByPath } from "./cursor";
+import { buildCursor, getCursorByPath } from "./cursor";
 import type { AgentRunResult, CursorNode, PoolState, TaskRuntime } from "./types";
 
 // ── Two-level retry ──────────────────────────────────────────────────────────
@@ -162,9 +162,22 @@ export async function reconcileForResume(
   },
 ): Promise<string[]> {
   for (const task of pool.tasks) {
-    if (task.status === "running" || task.status === "parked" || task.status === "failed") {
+    const wasFailed = task.status === "failed";
+    if (task.status === "running" || task.status === "parked" || wasFailed) {
       task.status = "ready";
       opts?.onAudit?.("task_ready", { taskId: task.id });
+    }
+
+    // A failed gateLoop may have exhausted its review phase while leaving the
+    // parent cursor pending and the review cursor done. Resetting only running
+    // leaves (the old behavior) makes the resumed task permanently demand no
+    // agent: it appears Ready with progress such as [1/2], but can never move.
+    // Failed tasks are fresh attempts, so rebuild their execution cursor.
+    if (wasFailed) {
+      task.cursor = buildCursor(task.compose, "0");
+      task.sessionFiles = [];
+      task.outputLines = [];
+      task.lastError = undefined;
     }
 
     // Reset every in-flight (running) atom — start fresh, do NOT resume

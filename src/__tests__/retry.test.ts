@@ -305,6 +305,41 @@ describe("reconcileForResume", () => {
     expect(p.tasks[0]!.status).toBe("ready");
   });
 
+  it("resets an exhausted gateLoop cursor on failed-task resume", async () => {
+    const compose = {
+      type: "gateLoop" as const,
+      work: { type: "agent" as const },
+      review: { type: "agent" as const },
+    };
+    const cursor = buildCursor(compose, "0");
+    cursor.state = "pending";
+    cursor.gatePhase = "review";
+    cursor.iteration = 4;
+    cursor.workCursor!.state = "done";
+    cursor.reviewCursor!.state = "done";
+    const p = pool([
+      task(cursor, {
+        id: "t-1",
+        status: "failed",
+        compose,
+        lastError: "gateLoop exhausted after 4 iterations",
+        sessionFiles: ["old-session.jsonl"],
+        outputLines: ["old output"],
+      }),
+    ]);
+
+    await reconcileForResume(p);
+
+    const resumed = p.tasks[0]!;
+    expect(resumed.status).toBe("ready");
+    expect(resumed.cursor.gatePhase).toBe("work");
+    expect(resumed.cursor.workCursor!.state).toBe("pending");
+    expect(resumed.cursor.reviewCursor!.state).toBe("pending");
+    expect(resumed.lastError).toBeUndefined();
+    expect(resumed.sessionFiles).toEqual([]);
+    expect(resumed.outputLines).toEqual([]);
+  });
+
   it("ready task stays ready", async () => {
     const p = pool([task(buildCursor(undefined, "0"), { id: "t-1", status: "ready" })]);
     await reconcileForResume(p);
