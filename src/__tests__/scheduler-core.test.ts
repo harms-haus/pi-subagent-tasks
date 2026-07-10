@@ -1138,7 +1138,7 @@ describe("scheduler core", () => {
   });
 
   // ── Additional coverage: rejected agent promise ───────────────────
-  it("cleans up (releases slot + decrements runningAgentCount) on a rejected agent promise", async () => {
+  it("routes a rejected agent promise through normal failure handling", async () => {
     const pool = createPool({
       tasks: [makeTask({ id: "t1", status: "ready" })],
     });
@@ -1156,7 +1156,10 @@ describe("scheduler core", () => {
       pools,
       sessionDir: SESSION_DIR,
       agentRunner: runner,
-      callbacks: stubCallbacks(),
+      callbacks: {
+        ...stubCallbacks(),
+        handleAgentError: vi.fn(() => "task-fail" as const),
+      },
     });
 
     // Start the agent — runAgent throws, rejection handler fires.
@@ -1170,12 +1173,9 @@ describe("scheduler core", () => {
     expect(pool.tasks[0]!.runningAgentCount).toBe(0);
     expect(pools.usage().total.used).toBe(0);
 
-    // The task stays in "running" status (it was transitioned before the
-    // promise rejected). Since no onAgentFinished path is taken, no merge
-    // is queued and no scheduling pass is triggered. The scheduler does
-    // NOT reach fixed point because the task is still "running".
-    expect(pool.tasks[0]!.status).toBe("running");
-    expect(scheduler.isComplete()).toBe(false);
+    // Startup failures must not strand a zero-agent task as "running".
+    expect(pool.tasks[0]!.status).toBe("failed");
+    expect(scheduler.isComplete()).toBe(true);
   });
 
   // ── Additional coverage: error handler — task-fail ────────────────

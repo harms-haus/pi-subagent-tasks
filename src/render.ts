@@ -129,7 +129,7 @@ export function renderBoard(
 
     // Tier header line: bold text in the tier's colour.
     const header = theme.fg(TIER_TOKENS[status], theme.bold(TIER_LABELS[status]));
-    container.addChild(new Text(header));
+    container.addChild(new Text(header, 0, 0));
     rowCount++;
 
     // Task rows within this tier.
@@ -156,16 +156,20 @@ export function renderBoard(
 
       const token = TIER_TOKENS[task.status];
       const row = `${theme.fg(token, icon)} ${displayName} [${done}/${total}]${retryStr}${elapsedStr}${errorStr}`;
-      container.addChild(new Text(row));
+      container.addChild(new Text(row, 0, 0));
       rowCount++;
       displayedTasks++;
 
       // Keep active task output inline with its header, using the same compact
       // rolling-window treatment as pi-subagents.
-      if (task.status === "running") {
+      if (task.status === "running" && task.runningAgentCount > 0) {
         const outputLines = task.outputLines ?? [];
-        for (const line of outputLines.slice(-10)) {
-          container.addChild(new Text(theme.fg("muted", `  ${line}`)));
+        if (outputLines.length === 0) {
+          container.addChild(new Text(theme.fg("muted", "  (starting...)"), 0, 0));
+        } else {
+          for (const line of outputLines.slice(-10)) {
+            container.addChild(new Text(theme.fg("muted", `  ${line}`), 0, 0));
+          }
         }
       }
     }
@@ -180,13 +184,13 @@ export function renderBoard(
       remaining > 0
         ? `${remaining}+ more — press ${keyHint("app.tools.expand", "Ctrl+O")} for full board`
         : `press ${keyHint("app.tools.expand", "Ctrl+O")} for full board`;
-    container.addChild(new Text(theme.fg("dim", hint)));
+    container.addChild(new Text(theme.fg("dim", hint), 0, 0));
   }
 
   // Footer: agent counts and merge indicator. Keep the board compact: the
   // output window itself provides the visual grouping for active tasks.
   const footer = buildBoardFooter(poolsUsage, mergeInProgress, theme);
-  container.addChild(new Text(footer));
+  container.addChild(new Text(footer, 0, 0));
 
   return container;
 }

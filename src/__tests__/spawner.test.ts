@@ -519,6 +519,19 @@ describe("spawnAgent", () => {
     expect(result.exitCode).toBe(1);
   });
 
+  it("emits compact tool previews from message_end toolCall parts", async () => {
+    const onOutput = vi.fn();
+    const promise = spawnAgent({ ...defaultOpts, onOutput });
+
+    feedAndExit([
+      `{"type":"message_end","message":{"content":[{"type":"text","text":"Checking"},{"type":"toolCall","name":"read","arguments":{"path":"/tmp/test/file.ts","limit":10}}]}}`,
+    ]);
+
+    await promise;
+    expect(onOutput).toHaveBeenCalledWith("Checking");
+    expect(onOutput).toHaveBeenCalledWith("📖 read → /tmp/test/file.ts +10");
+  });
+
   it("calls onUpdate for each parsed JSON event", async () => {
     const onUpdate = vi.fn();
     const promise = spawnAgent({ ...defaultOpts, onUpdate });

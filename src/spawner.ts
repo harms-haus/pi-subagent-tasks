@@ -106,10 +106,13 @@ function tryParseEvent(line: string): Record<string, unknown> | null {
  * Scan an event's `.message.content` array **backward** for the last text part.
  * Returns the text content, or `undefined` if none found.
  */
-function extractLastText(event: Record<string, unknown>): string | undefined {
+function messageContent(event: Record<string, unknown>): Array<Record<string, unknown>> {
   const msg = event.message as Record<string, unknown> | undefined;
-  if (!msg?.content || !Array.isArray(msg.content)) return undefined;
-  const content = msg.content as Array<Record<string, unknown>>;
+  return Array.isArray(msg?.content) ? (msg.content as Array<Record<string, unknown>>) : [];
+}
+
+function extractLastText(event: Record<string, unknown>): string | undefined {
+  const content = messageContent(event);
   for (let i = content.length - 1; i >= 0; i--) {
     const part = content[i];
     if (part?.type === "text" && typeof part.text === "string") {
@@ -117,6 +120,21 @@ function extractLastText(event: Record<string, unknown>): string | undefined {
     }
   }
   return undefined;
+}
+
+/** Emit compact previews for the canonical toolCall parts in message_end. */
+function emitMessageToolCalls(event: Record<string, unknown>, opts: SpawnOptions): void {
+  for (const part of messageContent(event)) {
+    if (part.type !== "toolCall" || typeof part.name !== "string") continue;
+    const args = part.arguments;
+    opts.onOutput?.(
+      toolPreview(
+        part.name,
+        args !== null && typeof args === "object" ? (args as Record<string, unknown>) : {},
+        opts.cwd,
+      ),
+    );
+  }
 }
 
 /**
@@ -265,25 +283,23 @@ export function spawnAgent(opts: SpawnOptions): Promise<SpawnResult> {
         }
       }
 
-      // 1. Last assistant text (message_end / turn_end)
-      if (event.type === "message_end" || event.type === "turn_end") {
+      // 1. message_end is the canonical assistant-output event. Tool calls
+      // are embedded in message.content as `toolCall` parts (pi-subagents uses
+      // this shape too), rather than being sourced from execution events.
+      if (event.type === "message_end") {
         const text = extractLastText(event);
         if (text !== undefined) {
           lastAssistantText = text;
           opts.onOutput?.(text);
         }
-      }
-
-      // 2. Rewrite tool calls to concise previews instead of dumping JSON args.
-      if (event.type === "tool_execution_start" && typeof event.toolName === "string") {
-        const args = event.args;
-        opts.onOutput?.(
-          toolPreview(
-            event.toolName,
-            args !== null && typeof args === "object" ? (args as Record<string, unknown>) : {},
-            opts.cwd,
-          ),
-        );
+        emitMessageToolCalls(event, opts);
+      } else if (event.type === "turn_end") {
+        // Defensive fallback for streams that omit message_end.
+        const text = extractLastText(event);
+        if (text !== undefined && text !== lastAssistantText) {
+          lastAssistantText = text;
+          opts.onOutput?.(text);
+        }
       }
 
       // 3. GateLoop verdict (tool_execution_end · gate_verdict)

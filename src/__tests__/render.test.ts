@@ -187,6 +187,34 @@ describe("renderBoard", () => {
     expect(moreLine).toBeUndefined();
   });
 
+  it("renders a starting placeholder and caps active output at the latest 10 lines", () => {
+    const task = makeTask("active", "running", {
+      runningAgentCount: 1,
+      outputLines: Array.from({ length: 12 }, (_, i) => `line-${i + 1}`),
+    });
+    const container = renderBoard(
+      makePool([task]),
+      { expanded: true, isPartial: true },
+      createMockTheme(),
+    );
+    const lines = container.children.filter((c): c is Text => c instanceof Text).map(textContent);
+
+    expect(lines).not.toContain("  line-1");
+    expect(lines).not.toContain("  line-2");
+    expect(lines).toContain("  line-3");
+    expect(lines).toContain("  line-12");
+
+    task.outputLines = [];
+    const starting = renderBoard(
+      makePool([task]),
+      { expanded: true, isPartial: true },
+      createMockTheme(),
+    );
+    expect(
+      starting.children.filter((c): c is Text => c instanceof Text).map(textContent),
+    ).toContain("  (starting...)");
+  });
+
   it("footer shows agent usage when poolsUsage is provided", () => {
     const pool = makePool([makeTask("t-1", "running")]);
     const theme = createMockTheme();

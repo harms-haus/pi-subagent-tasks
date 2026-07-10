@@ -324,14 +324,19 @@ export function createScheduler(opts: SchedulerOptions): Scheduler {
             inFlight.delete(key);
             await onAgentFinished(task.id, demand.atomPath, r);
           },
-          () => {
-            // Promise rejection: release all resources (pool slots, demandMeta,
-            // runningAgentCount) so the system does not deadlock, then
-            // re-trigger scheduling so freed slots get picked up.
-            void inFlight.delete(key);
-            releaseAgent(task.id, demand.atomPath);
-            globalSchedule();
-            opts.callbacks.onUpdate();
+          async (error: unknown) => {
+            // A runner can reject before spawning (for example, when profile
+            // resolution fails). Route that through the normal failure/retry
+            // path; merely releasing the slot leaves the task `running` with
+            // zero agents forever.
+            inFlight.delete(key);
+            await onAgentFinished(task.id, demand.atomPath, {
+              success: false,
+              lastText: "",
+              exitCode: -1,
+              error: error instanceof Error ? error.message : String(error),
+              durationMs: 0,
+            });
           },
         );
 
