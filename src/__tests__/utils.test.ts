@@ -4,10 +4,8 @@ import { homedir } from "node:os";
 
 import {
   slugify,
-  kebabCase,
   timecode,
   formatElapsed,
-  truncate,
   getAgentDir,
   getGlobalProfilesDir,
   getProjectProfilesDir,
@@ -48,21 +46,6 @@ describe("slugify", () => {
     expect(slugify("foo...bar")).toBe("foo-bar");
     expect(slugify("a b!c@d")).toBe("a-b-c-d");
     expect(slugify("release  feature  name")).toBe("release-feature-name");
-  });
-});
-
-// ── kebabCase ────────────────────────────────────────────────────────────────
-
-describe("kebabCase", () => {
-  it("produces kebab-case from labels", () => {
-    expect(kebabCase("Release Feature")).toBe("release-feature");
-  });
-
-  it("matches slugify behavior across inputs", () => {
-    const inputs = ["My Pool!", "  x  ", "A..B", "", "___", "a b!c"];
-    for (const input of inputs) {
-      expect(kebabCase(input)).toBe(slugify(input));
-    }
   });
 });
 
@@ -109,30 +92,6 @@ describe("formatElapsed", () => {
   it("renders hours", () => {
     expect(formatElapsed(3600000)).toBe("1h");
     expect(formatElapsed(7200000)).toBe("2h");
-  });
-});
-
-// ── truncate ─────────────────────────────────────────────────────────────────
-
-describe("truncate", () => {
-  it("returns input unchanged when within the limit", () => {
-    expect(truncate("hello", 10)).toBe("hello");
-    expect(truncate("hello", 5)).toBe("hello");
-  });
-
-  it("appends the default ellipsis when exceeding the limit", () => {
-    expect(truncate("hello world", 8)).toBe("hello...");
-    expect(truncate("hello world", 5)).toBe("he...");
-  });
-
-  it("slices the ellipsis to fit when max is very small", () => {
-    expect(truncate("hello world", 2)).toBe("..");
-    expect(truncate("hello world", 0)).toBe("");
-  });
-
-  it("supports a custom ellipsis", () => {
-    expect(truncate("hello world", 7, "…")).toBe("hello …");
-    expect(truncate("hello world", 1, "…")).toBe("…"); // max == ellipsis length
   });
 });
 

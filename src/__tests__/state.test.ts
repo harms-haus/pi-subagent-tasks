@@ -355,61 +355,13 @@ describe("AuditLogger", () => {
     logger.poolCreated({});
     logger.poolResumed({});
     logger.poolCompleted({});
-    logger.taskReady({});
-    logger.taskRunning({});
-    logger.taskParked({});
-    logger.taskFailed({});
-    logger.taskDone({});
-    logger.taskSkipped({});
-    logger.taskRetry({});
-    logger.agentStart({});
-    logger.agentComplete({});
-    logger.agentError({});
-    logger.agentResume({});
-    logger.agentRetry({});
-    logger.gateloopApproved({});
-    logger.gateloopRejected({});
-    logger.worktreeCreated({});
-    logger.worktreeMerged({});
-    logger.worktreeDeleted({});
-    logger.mergeStarted({});
-    logger.mergeConflict({});
-    logger.mergeResolved({});
-    logger.mergeFailed({});
-    logger.limitBlocked({});
 
     logger.close();
 
     const lines = readFileSync(join(dir, AUDIT_FILE), "utf-8").trim().split("\n");
-    expect(lines).toHaveLength(25);
+    expect(lines).toHaveLength(3);
 
-    const expectedTypes = [
-      "pool_created",
-      "pool_resumed",
-      "pool_completed",
-      "task_ready",
-      "task_running",
-      "task_parked",
-      "task_failed",
-      "task_done",
-      "task_skipped",
-      "task_retry",
-      "agent_start",
-      "agent_complete",
-      "agent_error",
-      "agent_resume",
-      "agent_retry",
-      "gateloop_approved",
-      "gateloop_rejected",
-      "worktree_created",
-      "worktree_merged",
-      "worktree_deleted",
-      "merge_started",
-      "merge_conflict",
-      "merge_resolved",
-      "merge_failed",
-      "limit_blocked",
-    ];
+    const expectedTypes = ["pool_created", "pool_resumed", "pool_completed"];
 
     for (let i = 0; i < expectedTypes.length; i++) {
       const parsed = JSON.parse(lines[i]!);

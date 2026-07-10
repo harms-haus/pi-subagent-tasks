@@ -295,8 +295,9 @@ describe("renderBoard", () => {
     const textChildren = container.children.filter((c): c is Text => c instanceof Text);
     const row = textChildren.find((t) => textContent(t).includes("t-gl"));
     expect(row).toBeDefined();
-    // Two agent leaves (work + review), none done: [0/2]
-    expect(textContent(row!)).toContain("[0/2]");
+    // Only the work sub-cursor is counted (review is an internal step, L2).
+    // One agent leaf (work), none done: [0/1]
+    expect(textContent(row!)).toContain("[0/1]");
   });
 
   it("counts done agent leaves in a loop composite cursor", () => {

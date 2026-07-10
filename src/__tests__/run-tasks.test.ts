@@ -94,6 +94,7 @@ function createMockScheduler() {
       completed = true;
     }),
     onAgentFinished: vi.fn(),
+    ensureWorktrees: vi.fn(async () => {}),
     isComplete: vi.fn(() => completed),
     getInFlightCount: vi.fn(() => 0),
     mergeComplete: vi.fn(() => {
@@ -286,7 +287,10 @@ describe("run_tasks tool", () => {
     expect(worktreesModule.isGitRepo).toHaveBeenCalled();
     expect(worktreesModule.canUseWorktrees).toHaveBeenCalled();
     expect(worktreesModule.createPoolWorktree).toHaveBeenCalled();
-    expect(worktreesModule.createTaskWorktree).toHaveBeenCalled();
+    // H1: task worktrees are created lazily via ensureWorktrees() during
+    // the run loop, not eagerly during CREATE. The mocked scheduler's
+    // ensureWorktrees is a no-op, so createTaskWorktree is NOT called
+    // here. Lazy creation is covered by scheduler-core / integration tests.
     expect(worktreesModule.ensureExcludeEntry).toHaveBeenCalled();
     expect(stateModule.writeState).toHaveBeenCalled();
     expect(schedulerModule.createComposeScheduler).toHaveBeenCalled();
@@ -468,6 +472,7 @@ describe("run_tasks tool", () => {
         }, 2000);
       }),
       onAgentFinished: vi.fn(),
+      ensureWorktrees: vi.fn(async () => {}),
       isComplete: vi.fn(() => schedulerCompleted),
       getInFlightCount: vi.fn(() => 0),
       mergeComplete: vi.fn(),

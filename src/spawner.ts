@@ -110,16 +110,35 @@ function extractLastText(event: Record<string, unknown>): string | undefined {
 
 /**
  * Extract a {@link GateVerdict} from a `tool_execution_end` event whose
- * `toolName` is `"gate_verdict"`. Returns `undefined` when the event doesn't
- * carry a toolName match or lacks usable result/args fields.
+ * `toolName` is `"gate_verdict"`.
+ *
+ * The real pi JSON stream emits the full `AgentToolResult<T>` on the event's
+ * `result` field, i.e. `{ content, details: { approved, feedback }, terminate? }`.
+ * The verdict is therefore nested under `result.details`, **not** sitting on
+ * `result` itself. This function reads the canonical `result.details` shape,
+ * defensively tolerating a flat `result` (or `args`) as a fallback.
+ *
+ * Returns `undefined` when the event doesn't carry a `gate_verdict` toolName,
+ * lacks a usable result/args object, or has no boolean `approved` value — so the
+ * caller's no-verdict / reminder-retry path handles malformed events.
  */
 function extractVerdict(event: Record<string, unknown>): GateVerdict | undefined {
   const toolName = event.toolName as string | undefined;
   if (toolName !== "gate_verdict") return undefined;
-  const result = (event.result ?? event.args ?? {}) as Record<string, unknown>;
+
+  const result = (event.result ?? event.args) as Record<string, unknown> | undefined;
+  if (!result || typeof result !== "object") return undefined;
+
+  // Canonical platform shape (AgentToolResult<T>): the verdict is in `details`.
+  // Defensively fall back to a flat `result` so legacy/malformed shapes still work.
+  const details = result.details as Record<string, unknown> | undefined;
+  const src = details && typeof details === "object" ? details : result;
+
+  // Require a real boolean verdict; absent/invalid → no verdict.
+  if (typeof src.approved !== "boolean") return undefined;
   return {
-    approved: Boolean(result.approved),
-    feedback: typeof result.feedback === "string" ? result.feedback : "",
+    approved: src.approved,
+    feedback: typeof src.feedback === "string" ? src.feedback : "",
   };
 }
 

@@ -14,9 +14,12 @@
  *   - exitCode -1 (spawn error) skips session handling
  */
 
-import { describe, it, expect, vi, beforeEach } from "vitest";
+import { describe, it, expect, vi, beforeEach, afterEach } from "vitest";
 import { EventEmitter } from "node:events";
 import type { ChildProcess } from "node:child_process";
+import { tmpdir } from "node:os";
+import { writeFileSync, rmSync } from "node:fs";
+import { join } from "node:path";
 
 import type { SpawnResult } from "../spawner";
 import type { Profile } from "../profiles";
@@ -31,12 +34,17 @@ const {
   mockProfileToArgs,
   mockFindSessionFile,
   mockRenameSession,
+  mockExecSync,
 } = vi.hoisted(() => ({
   mockSpawnAgent: vi.fn<(opts: Record<string, unknown>) => Promise<SpawnResult>>(),
   mockResolveProfile: vi.fn<(name: string, cwd: string) => Profile>(),
   mockProfileToArgs: vi.fn<(profile: Profile) => { args: string[]; env: Record<string, string> }>(),
   mockFindSessionFile: vi.fn<(sessionDir: string) => string | undefined>(),
   mockRenameSession: vi.fn<(src: string, dir: string, name: string) => string>(),
+  // Stands in for `which pi` inside resolvePiBinary(). Default impl (set in
+  // beforeEach) reports `pi` as absent so binary resolution is deterministic
+  // regardless of the host PATH.
+  mockExecSync: vi.fn<(...args: unknown[]) => unknown>(),
 }));
 
 // ── Module mocks ─────────────────────────────────────────────────────────────
@@ -60,9 +68,20 @@ vi.mock("../sessions", async () => {
   };
 });
 
+// Mock execSync (used by resolvePiBinary's `which pi`) so binary resolution is
+// deterministic; everything else in node:child_process stays real (the
+// ChildProcess type import is unaffected at runtime).
+vi.mock("node:child_process", async () => {
+  const actual = await vi.importActual<typeof import("node:child_process")>("node:child_process");
+  return {
+    ...actual,
+    execSync: mockExecSync,
+  };
+});
+
 // ── SUT ──────────────────────────────────────────────────────────────────────
 
-import { createRealAgentRunner } from "../agent-runner";
+import { createRealAgentRunner, resolvePiBinary } from "../agent-runner";
 
 // ── Helpers ──────────────────────────────────────────────────────────────────
 
@@ -134,6 +153,13 @@ const defaultProfileArgs = { args: ["--provider", "anthropic"], env: {} };
 describe("createRealAgentRunner", () => {
   beforeEach(() => {
     vi.clearAllMocks();
+
+    // Default `which pi` lookup reports `pi` as absent → deterministic binary
+    // resolution for the runAgent tests below (see resolvePiBinary describe
+    // block for tier-by-tier coverage).
+    mockExecSync.mockImplementation(() => {
+      throw new Error("spawn which ENOENT");
+    });
 
     // Default mock implementations
     mockResolveProfile.mockReturnValue(defaultProfile);
@@ -297,13 +323,16 @@ describe("createRealAgentRunner", () => {
     expect(result.loopDetected).toBe(false);
   });
 
-  it("sets success:false when lastText is empty despite exitCode 0", async () => {
+  it("sets success:true when exitCode 0 even if lastText is empty (H4)", async () => {
+    // H4: a tool-only final turn (e.g. gate_verdict with terminate:true)
+    // legitimately emits no trailing text and must NOT be misclassified as
+    // a failure.
     mockSpawnAgent.mockResolvedValue(successfulSpawnResult({ lastAssistantText: "" }));
     const runner = createRunner();
 
     const result = await runner.runAgent(defaultDemand, defaultRunOpts);
 
-    expect(result.success).toBe(false);
+    expect(result.success).toBe(true);
     expect(result.exitCode).toBe(0);
     expect(result.lastText).toBe("");
   });
@@ -507,39 +536,47 @@ describe("createRealAgentRunner", () => {
   });
 
   // ── (m) Binary resolution ──────────────────────────────────────────────
+  //
+  // Detailed tier-by-tier coverage lives in the `resolvePiBinary` describe
+  // block below; these tests verify runAgent wires the resolved binary into
+  // spawnAgent (command + argsPrefix prepended to the agent args). `which pi`
+  // is mocked absent in beforeEach so argv[1] drives the result.
 
-  it("uses process.execPath + argv[1] when running from a real script", async () => {
+  it("uses process.execPath + argv[1] when argv[1] is a real fs path", async () => {
     const origArgv1 = process.argv[1] as string;
-    // Simulate a real script path
-    const testEntry = "/home/user/project/src/index.ts";
+    // argv[1] must be a real filesystem path for the node heuristic tier
+    const testEntry = join(tmpdir(), `pi-task-pools-entry-${Date.now()}.js`);
+    writeFileSync(testEntry, "");
     process.argv[1] = testEntry;
+    try {
+      const runner = createRunner();
+      await runner.runAgent(defaultDemand, defaultRunOpts);
 
-    const runner = createRunner();
-    await runner.runAgent(defaultDemand, defaultRunOpts);
-
-    expect(mockSpawnAgent).toHaveBeenCalledOnce();
-    const opts = getSpawnOpts();
-    expect(opts.command).toBe(process.execPath);
-    const commandArgs = opts.args as string[];
-    expect(commandArgs[0]).toBe(testEntry);
-
-    // Restore
-    process.argv[1] = origArgv1;
+      expect(mockSpawnAgent).toHaveBeenCalledOnce();
+      const opts = getSpawnOpts();
+      expect(opts.command).toBe(process.execPath);
+      const commandArgs = opts.args as string[];
+      expect(commandArgs[0]).toBe(testEntry);
+    } finally {
+      process.argv[1] = origArgv1;
+      rmSync(testEntry, { force: true });
+    }
   });
 
   it("uses bare 'pi' command when running from bun virtual fs", async () => {
     const origArgv1 = process.argv[1] as string;
     process.argv[1] = "/$bunfs/some-virtual-path";
 
-    const runner = createRunner();
-    await runner.runAgent(defaultDemand, defaultRunOpts);
+    try {
+      const runner = createRunner();
+      await runner.runAgent(defaultDemand, defaultRunOpts);
 
-    expect(mockSpawnAgent).toHaveBeenCalledOnce();
-    const opts = getSpawnOpts();
-    expect(opts.command).toBe("pi");
-
-    // Restore
-    process.argv[1] = origArgv1;
+      expect(mockSpawnAgent).toHaveBeenCalledOnce();
+      const opts = getSpawnOpts();
+      expect(opts.command).toBe("pi");
+    } finally {
+      process.argv[1] = origArgv1;
+    }
   });
 
   it("uses bare 'pi' command when argv[1] is undefined", async () => {
@@ -547,15 +584,36 @@ describe("createRealAgentRunner", () => {
     // @ts-expect-error - testing undefined argv[1]
     process.argv[1] = undefined;
 
-    const runner = createRunner();
-    await runner.runAgent(defaultDemand, defaultRunOpts);
+    try {
+      const runner = createRunner();
+      await runner.runAgent(defaultDemand, defaultRunOpts);
 
-    expect(mockSpawnAgent).toHaveBeenCalledOnce();
-    const opts = getSpawnOpts();
-    expect(opts.command).toBe("pi");
+      expect(mockSpawnAgent).toHaveBeenCalledOnce();
+      const opts = getSpawnOpts();
+      expect(opts.command).toBe("pi");
+    } finally {
+      process.argv[1] = origArgv1;
+    }
+  });
 
-    // Restore
-    process.argv[1] = origArgv1;
+  it("uses the `pi` resolved on PATH when no override is set", async () => {
+    mockExecSync.mockImplementation(() => "/usr/local/bin/pi\n");
+    const origArgv1 = process.argv[1] as string;
+    // A real-ish path that would otherwise hit the node heuristic tier
+    process.argv[1] = join(tmpdir(), "some-real-entry.js");
+    try {
+      const runner = createRunner();
+      await runner.runAgent(defaultDemand, defaultRunOpts);
+
+      expect(mockSpawnAgent).toHaveBeenCalledOnce();
+      const opts = getSpawnOpts();
+      expect(opts.command).toBe("/usr/local/bin/pi");
+      const commandArgs = opts.args as string[];
+      // No script prefix — agent args start at --mode
+      expect(commandArgs[0]).toBe("--mode");
+    } finally {
+      process.argv[1] = origArgv1;
+    }
   });
 
   // ── (n) cwd passthrough ────────────────────────────────────────────────
@@ -578,5 +636,100 @@ describe("createRealAgentRunner", () => {
     expect(mockSpawnAgent).toHaveBeenCalledOnce();
     const opts = getSpawnOpts();
     expect(opts.stdinPrompt).toBe(defaultDemand.effectivePrompt);
+  });
+});
+
+// ── resolvePiBinary ──────────────────────────────────────────────────────────
+//
+// Unit tests for the deterministic binary-resolution helper, exercising each
+// preference tier in isolation. `which pi` (execSync) and the binary-override
+// env vars are fully controlled per test.
+
+describe("resolvePiBinary", () => {
+  // Snapshot of shared global state so each test runs in isolation.
+  const origArgv1 = process.argv[1] as string;
+  let origEnvTask: string | undefined;
+  let origEnvBin: string | undefined;
+
+  beforeEach(() => {
+    origEnvTask = process.env.PI_TASK_POOLS_PI_BIN;
+    origEnvBin = process.env.PI_BIN;
+    delete process.env.PI_TASK_POOLS_PI_BIN;
+    delete process.env.PI_BIN;
+    process.argv[1] = origArgv1;
+    mockExecSync.mockReset();
+    // Default: `which pi` finds nothing on PATH.
+    mockExecSync.mockImplementation(() => {
+      throw new Error("spawn which ENOENT");
+    });
+  });
+
+  afterEach(() => {
+    if (origEnvTask === undefined) delete process.env.PI_TASK_POOLS_PI_BIN;
+    else process.env.PI_TASK_POOLS_PI_BIN = origEnvTask;
+    if (origEnvBin === undefined) delete process.env.PI_BIN;
+    else process.env.PI_BIN = origEnvBin;
+    process.argv[1] = origArgv1;
+  });
+
+  it("PI_TASK_POOLS_PI_BIN env override wins over every other tier", () => {
+    process.env.PI_TASK_POOLS_PI_BIN = "/override/pi";
+    process.env.PI_BIN = "/secondary/pi";
+    mockExecSync.mockImplementation(() => "/usr/local/bin/pi\n");
+
+    expect(resolvePiBinary()).toEqual({ command: "/override/pi", argsPrefix: [] });
+    // The override short-circuits before any PATH lookup.
+    expect(mockExecSync).not.toHaveBeenCalled();
+  });
+
+  it("PI_BIN is honoured as a secondary env override", () => {
+    process.env.PI_BIN = "/secondary/pi";
+    mockExecSync.mockImplementation(() => "/usr/local/bin/pi\n");
+
+    expect(resolvePiBinary()).toEqual({ command: "/secondary/pi", argsPrefix: [] });
+    expect(mockExecSync).not.toHaveBeenCalled();
+  });
+
+  it("resolves `pi` on PATH when no env override is set", () => {
+    mockExecSync.mockImplementation(() => "/usr/local/bin/pi\n");
+
+    expect(resolvePiBinary()).toEqual({ command: "/usr/local/bin/pi", argsPrefix: [] });
+    expect(mockExecSync).toHaveBeenCalledWith("which pi", expect.anything());
+  });
+
+  it("falls back to node <argv[1]> when pi is off PATH and argv[1] is a real path", () => {
+    const tmp = join(tmpdir(), `pi-entry-${Date.now()}.mjs`);
+    writeFileSync(tmp, "");
+    process.argv[1] = tmp;
+    try {
+      expect(resolvePiBinary()).toEqual({
+        command: process.execPath,
+        argsPrefix: [tmp],
+      });
+    } finally {
+      rmSync(tmp, { force: true });
+    }
+  });
+
+  it("skips the node heuristic when argv[1] is a bun virtual path", () => {
+    process.argv[1] = "/$bunfs/some-virtual-path";
+    expect(resolvePiBinary()).toEqual({ command: "pi", argsPrefix: [] });
+  });
+
+  it("skips the node heuristic when argv[1] is not a real fs path", () => {
+    process.argv[1] = "/does/not/exist/entry.ts";
+    expect(resolvePiBinary()).toEqual({ command: "pi", argsPrefix: [] });
+  });
+
+  it("returns bare 'pi' as the final fallback when argv[1] is undefined", () => {
+    // @ts-expect-error - testing undefined argv[1]
+    process.argv[1] = undefined;
+    expect(resolvePiBinary()).toEqual({ command: "pi", argsPrefix: [] });
+  });
+
+  it("treats an empty `which pi` result as not-found", () => {
+    mockExecSync.mockImplementation(() => "\n");
+    process.argv[1] = "/$bunfs/x"; // force past the node heuristic too
+    expect(resolvePiBinary()).toEqual({ command: "pi", argsPrefix: [] });
   });
 });

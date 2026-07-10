@@ -28,6 +28,26 @@ import { getCursorByPath, resetCursorToPending } from "./cursor";
 import { assertNever } from "./utils";
 import type { AgentDemand, AgentRunResult, CursorNode, TaskRuntime } from "./types";
 
+// ── Profile resolution seam (C3 fix) ─────────────────────────────────────────
+
+/**
+ * Synchronous lookup that resolves a profile name to its `provider`/`model`
+ * fields, so they can be attached to {@link AgentDemand}s for concurrency-pool
+ * accounting (D7's three AND-gated pools).
+ *
+ * When provided to {@link nextWantedAgents}, each pending agent demand will
+ * have its `provider`/`model` populated from the resolved profile. When
+ * omitted (or returns an empty object), the demand's `provider`/`model` remain
+ * `undefined` and `tryAcquire` gates only on the `total` pool (legacy
+ * behavior).
+ *
+ * The resolver is expected to be a thin wrapper around
+ * `resolveProfile(name, cwd)` from `profiles.ts` — which is synchronous and
+ * cached — but is injected as a seam to keep `atoms.ts` decoupled from disk I/O
+ * and to simplify unit testing.
+ */
+export type ProfileResolver = (profileName: string) => { provider?: string; model?: string };
+
 // ── Prompt assembly (§5.1, §5.5) ─────────────────────────────────────────────
 
 /**
@@ -61,15 +81,23 @@ export function assemblePrompt(flowContext: string | undefined, taskPrompt: stri
  *
  * Running/done/failed nodes produce no demands.
  *
- * @param task  the live task runtime (cursor tree is read, not mutated).
+ * @param task             the live task runtime (cursor tree is read, not mutated).
+ * @param profileResolver  optional sync lookup that resolves each atom's
+ *                          profile name to `{provider?, model?}` so they can
+ *                          be attached to the returned demands for
+ *                          concurrency-pool accounting (C3 fix, D7). When
+ *                          omitted, demands carry no `provider`/`model`.
  * @returns demands for every agent session the scheduler should attempt to
  *          start right now. Empty array when nothing can start.
  */
-export function nextWantedAgents(task: TaskRuntime): AgentDemand[] {
+export function nextWantedAgents(
+  task: TaskRuntime,
+  profileResolver?: ProfileResolver,
+): AgentDemand[] {
   // No worktree → no agents can run (task hasn't started yet or worktree deleted)
   if (!task.worktreePath) return [];
 
-  return demandsFor(task.cursor, undefined, task);
+  return demandsFor(task.cursor, undefined, task, profileResolver);
 }
 
 /**
@@ -86,15 +114,17 @@ function demandsFor(
   node: CursorNode,
   incomingFlow: string | undefined,
   task: TaskRuntime,
+  profileResolver?: ProfileResolver,
 ): AgentDemand[] {
   // Agent leaves: only pending agents produce demands.
   if (node.kind === "agent") {
     if (node.state !== "pending") return [];
+    const profileName = node.profile ?? task.profile ?? "";
     const demand: AgentDemand = {
       atomPath: node.path,
       // `""` is a sentinel meaning "no profile resolvable" — the scheduler
       // will fail at agent-start when it tries to load a profile by empty name.
-      profileName: node.profile ?? task.profile ?? "",
+      profileName,
       effectivePrompt: assemblePrompt(incomingFlow, task.prompt),
       // GateLoop work agent fallback: use the parent gateLoop's workSessionFile
       // when the work cursor itself has no sessionFile (e.g. after a rejection
@@ -107,9 +137,15 @@ function demandsFor(
           : undefined),
       cwd: task.worktreePath ?? "",
       taskId: task.id,
-      // provider and model intentionally left undefined — resolved by the
-      // profile loading / AgentRunner seam.
+      // provider/model are resolved from the profile when a profileResolver
+      // is supplied (C3 fix). Without a resolver they remain undefined and
+      // tryAcquire gates only on the `total` pool (legacy behavior).
     };
+    if (profileResolver !== undefined) {
+      const resolved = profileResolver(profileName);
+      if (resolved.provider !== undefined) demand.provider = resolved.provider;
+      if (resolved.model !== undefined) demand.model = resolved.model;
+    }
     return [demand];
   }
 
@@ -130,7 +166,7 @@ function demandsFor(
       // Sequential pipelining (§5.5): when childIndex > 0, the flow context
       // for the next child is the previous sibling's lastText.
       const flow = idx > 0 ? (children[idx - 1]?.lastText ?? incomingFlow) : incomingFlow;
-      return demandsFor(child, flow, task);
+      return demandsFor(child, flow, task, profileResolver);
     }
 
     case "parallel": {
@@ -140,7 +176,7 @@ function demandsFor(
       const result: AgentDemand[] = [];
       for (const child of children) {
         // Each child gets the SAME incoming context (§5.5 parallel rule).
-        result.push(...demandsFor(child, incomingFlow, task));
+        result.push(...demandsFor(child, incomingFlow, task, profileResolver));
       }
       return result;
     }
@@ -152,13 +188,13 @@ function demandsFor(
         if (node.lastFeedback) {
           flow = `Previous review feedback:\n${node.lastFeedback}\n\n${incomingFlow ?? ""}`;
         }
-        if (node.workCursor) return demandsFor(node.workCursor, flow, task);
+        if (node.workCursor) return demandsFor(node.workCursor, flow, task, profileResolver);
         return [];
       }
       // Review phase: workCursor.lastText is the flow context (§5.5 gateLoop rule).
       if (node.reviewCursor) {
         const flow = node.workCursor?.lastText ?? "";
-        return demandsFor(node.reviewCursor, flow, task);
+        return demandsFor(node.reviewCursor, flow, task, profileResolver);
       }
       return [];
     }
@@ -169,7 +205,7 @@ function demandsFor(
       // Iteration 1: pass the parent's incomingFlow.
       // Iteration > 1: pass prevIterationText (the last iteration's output) (§5.5, §17.2).
       const flow = li > 1 ? (prevText ?? "") : incomingFlow;
-      if (node.childCursor) return demandsFor(node.childCursor, flow, task);
+      if (node.childCursor) return demandsFor(node.childCursor, flow, task, profileResolver);
       return [];
     }
 
@@ -431,17 +467,3 @@ export function gateLoopParentPath(atomPath: string): string | undefined {
   }
   return undefined;
 }
-
-/**
- * Recursively reset mutable runtime fields in a cursor subtree back to their
- * initial (pre-run) values, matching the fresh-build state per kind. Used by
- * loop to prepare the child cursor for the next iteration.
- *
- * Each kind resets only its own tracked fields (matching what
- * {@link buildCursor} sets as initial defaults). Shared fields like `lastText`,
- * `sessionFile`, and `executionCount` are cleared only on leaf (agent) nodes;
- * container nodes reset their kind-specific tracking fields and recurse.
- *
- * Structural metadata (path, kind, profile, title, count, maxIterations, etc.)
- * is preserved. Only execution-tracked fields are cleared.
- */

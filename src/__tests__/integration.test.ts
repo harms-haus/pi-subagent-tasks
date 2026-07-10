@@ -13,14 +13,37 @@
  */
 
 import { describe, it, expect, vi, beforeEach, afterAll } from "vitest";
-import { execSync } from "node:child_process";
-import { existsSync, mkdtempSync, rmSync, writeFileSync } from "node:fs";
+import { execSync, spawn } from "node:child_process";
+import {
+  copyFileSync,
+  existsSync,
+  mkdtempSync,
+  readdirSync,
+  rmSync,
+  statSync,
+  writeFileSync,
+  type Dirent,
+} from "node:fs";
 import { join } from "node:path";
 import { tmpdir } from "node:os";
+import { fileURLToPath } from "node:url";
+
+import { Text } from "@earendil-works/pi-tui";
 
 import { createRunTasksTool, type CreateRunTasksToolOptions } from "../run-tasks";
-import type { AgentDemand, AgentRunResult, AgentRunner, ExecResult } from "../types";
+import { renderBoard } from "../render";
+import { buildCursor } from "../cursor";
+import type {
+  AgentDemand,
+  AgentRunResult,
+  AgentRunner,
+  ExecResult,
+  PoolState,
+  Status,
+  TaskRuntime,
+} from "../types";
 import type { GitOps } from "../git-op";
+import { createMockTheme } from "./helpers/mock-api";
 
 // ── Temp repo management ──────────────────────────────────────────────────
 
@@ -298,8 +321,8 @@ describe("integration tests (compose engine e2e)", () => {
         callCount.set(path, count);
 
         // 'plan' agent always fails → exhaust all retry levels.
-        // SOFT_RETRY_CAP = 5, default maxRetries = 2 (pool default).
-        // Total failures needed: 6 per cycle × (maxRetries + 1) = 18.
+        // SOFT_RETRY_CAP = 4, default maxRetries = 2 (pool default).
+        // Total failures needed: 5 per cycle × (maxRetries + 1) = 15.
         // To keep tests fast, we pass maxRetries: 0.
         if (demand.taskId === "plan") {
           return {
@@ -333,7 +356,7 @@ describe("integration tests (compose engine e2e)", () => {
           { id: "tests", prompt: "Write tests", dependsOn: ["plan"] },
           { id: "code", prompt: "Implement", dependsOn: ["tests"] },
         ],
-        maxRetries: 0, // one L2-restart cycle → 6 failures → task-fail
+        maxRetries: 0, // one L2-restart cycle → 5 failures → task-fail
       },
       undefined,
       undefined,
@@ -341,7 +364,7 @@ describe("integration tests (compose engine e2e)", () => {
     );
 
     // Wait for fixed point — the task should be permanently failed.
-    // Soft-retry cap is 5, so 6 failures exhaust L1, then maxRetries=0
+    // Soft-retry cap is 4, so 5 failures exhaust L1, then maxRetries=0
     // means no L2 retry → immediate L3 (task-fail).
     const text = contentText(result);
     expect(text).toContain("Pool: Failure Prop");
@@ -652,39 +675,319 @@ describe("integration tests (compose engine e2e)", () => {
   });
 });
 
-// ── Smoke test stubs (require real pi binary; run manually) ────────────────
+// ── Smoke-test infrastructure (opt-in; §21) ───────────────────────────────
 
 /**
- * Smoke test stubs for manual verification using the real `pi` binary.
- *
- * These tests require:
- *   - A real `pi` binary on $PATH
- *   - No `--no-session` flag set (S1, S2)
- *   - A real TUI or --mode json (S1, S2, S3)
- *   - The extension loaded via --extension injection (S4)
- *
- * To run:
- *   npx vitest run --no-coverage src/__tests__/integration.test.ts -t "S[1-4]"
- *
- * (describe.skip prevents them from running in CI)
+ * Resolve the pi binary for opt-in smoke tests. Honours an explicit `PI_BIN`
+ * env override; otherwise probes `$PATH` via `command -v`/`which`. Returns
+ * `null` when no binary is available so the smoke tests skip cleanly.
  */
-describe.skip("smoke test stubs (manual)", () => {
-  it.todo(
-    "S1: `pi --mode json -p --session-dir <tmp> <prompt>` writes a session " +
-      "file FLAT (no `--<cwd>--` nesting) without `--no-session`",
+function resolvePiBin(): string | null {
+  if (process.env.PI_BIN) return process.env.PI_BIN;
+  try {
+    const out = execSync("command -v pi 2>/dev/null || which pi 2>/dev/null", {
+      stdio: ["ignore", "pipe", "ignore"],
+      encoding: "utf8",
+    }).trim();
+    return out.length > 0 ? out : null;
+  } catch {
+    return null;
+  }
+}
+
+/**
+ * Whether an LLM provider API key appears to be set. The smoke tests that
+ * spawn a real `pi` run drive a live model, so they need a key in addition to
+ * the binary.
+ */
+function hasApiKey(): boolean {
+  return Boolean(
+    process.env.ANTHROPIC_API_KEY ||
+    process.env.OPENAI_API_KEY ||
+    process.env.GOOGLE_API_KEY ||
+    process.env.GEMINI_API_KEY ||
+    process.env.OPENROUTER_API_KEY ||
+    process.env.AZURE_OPENAI_API_KEY,
+  );
+}
+
+const PI_BIN = resolvePiBin();
+/** S1/S2/S4 need both a real `pi` binary and an LLM API key. */
+const CAN_SMOKE = PI_BIN !== null && hasApiKey();
+
+/** Result of an opt-in `pi` smoke run. */
+interface PiRunResult {
+  exitCode: number | null;
+  stdout: string;
+  stderr: string;
+  /** Parsed JSON event lines from stdout. */
+  events: Array<Record<string, unknown>>;
+}
+
+/**
+ * Spawn the pi binary, feed it a prompt via stdin, and collect stdout/stderr
+ * plus parsed JSON events. Resolves on process exit or after `timeoutMs`
+ * (the child is SIGKILL'd on timeout so the test never hangs).
+ */
+function runPi(
+  bin: string,
+  args: string[],
+  opts: { stdinPrompt?: string; cwd?: string; timeoutMs?: number },
+): Promise<PiRunResult> {
+  return new Promise<PiRunResult>((resolve) => {
+    const proc = spawn(bin, args, {
+      cwd: opts.cwd ?? process.cwd(),
+      shell: false,
+      stdio: ["pipe", "pipe", "pipe"],
+      env: { ...process.env },
+    });
+    let stdout = "";
+    let stderr = "";
+    let settled = false;
+
+    const finish = (exitCode: number | null): void => {
+      if (settled) return;
+      settled = true;
+      clearTimeout(timer);
+      const events: Array<Record<string, unknown>> = [];
+      for (const line of stdout.split("\n")) {
+        const trimmed = line.trim();
+        if (!trimmed.startsWith("{")) continue;
+        try {
+          events.push(JSON.parse(trimmed) as Record<string, unknown>);
+        } catch {
+          // non-JSON line (e.g. a stray log) — ignore
+        }
+      }
+      resolve({ exitCode, stdout, stderr, events });
+    };
+
+    const timer = setTimeout(() => {
+      try {
+        proc.kill("SIGKILL");
+      } catch {
+        // process may already have exited
+      }
+      finish(null);
+    }, opts.timeoutMs ?? 120_000);
+
+    proc.stdout.on("data", (chunk: Buffer) => {
+      stdout += chunk.toString("utf8");
+    });
+    proc.stderr.on("data", (chunk: Buffer) => {
+      stderr += chunk.toString("utf8");
+    });
+    proc.on("close", (code) => {
+      finish(code ?? null);
+    });
+    proc.on("error", () => {
+      finish(-1);
+    });
+
+    if (opts.stdinPrompt !== undefined) {
+      proc.stdin.write(opts.stdinPrompt);
+    }
+    proc.stdin.end();
+  });
+}
+
+/** Recursively collect every `*.jsonl` file under `dir`. */
+function findSessionFiles(dir: string): string[] {
+  const found: string[] = [];
+  const stack = [dir];
+  while (stack.length > 0) {
+    const current = stack.pop();
+    if (current === undefined) continue;
+    let entries: Dirent[];
+    try {
+      entries = readdirSync(current, { withFileTypes: true });
+    } catch {
+      continue;
+    }
+    for (const entry of entries) {
+      const full = join(current, entry.name);
+      if (entry.isDirectory()) {
+        stack.push(full);
+      } else if (entry.isFile() && entry.name.endsWith(".jsonl")) {
+        found.push(full);
+      }
+    }
+  }
+  return found;
+}
+
+// ── Smoke-test data helpers (pure; used by S3) ────────────────────────────
+
+/** Build a minimal {@link TaskRuntime} for board-render assertions. */
+function makeSmokeTask(id: string, status: Status): TaskRuntime {
+  const cursor = buildCursor(undefined, id);
+  if (status === "done") cursor.state = "done";
+  return {
+    id,
+    prompt: "smoke",
+    dependsOn: [],
+    compose: { type: "agent" },
+    cursor,
+    status,
+    retryCount: 0,
+    runningAgentCount: 0,
+    worktreePath: `/tmp/wt/${id}`,
+    branch: `pi-task-pool/${id}`,
+    sessionFiles: [],
+    downstreamCount: 0,
+  };
+}
+
+/** Build a minimal {@link PoolState} wrapping the given tasks. */
+function makeSmokePool(tasks: TaskRuntime[]): PoolState {
+  return {
+    id: "smoke-pool",
+    name: "Smoke Pool",
+    branch: "pi-task-pool/smoke",
+    poolWorktree: "/tmp/pi-task-pool/smoke",
+    baseBranch: "main",
+    limits: { total: 4, provider: {}, model: {} },
+    maxRetries: 2,
+    createdAt: 1_000_000,
+    updatedAt: 1_000_000,
+    status: "running",
+    tasks,
+    mergeQueue: [],
+  };
+}
+
+// ── Smoke tests (opt-in: set PI_BIN + an LLM API key) ──────────────────────
+
+/**
+ * Real implementations of the §21 smoke tests.
+ *
+ * S1/S2/S4 spawn the actual `pi` binary and drive a live model, so they only
+ * execute when BOTH the `PI_BIN` binary is resolvable AND an LLM API key is
+ * present — otherwise they skip cleanly. S3 is a pure render assertion and
+ * always runs.
+ *
+ * To run the live tests:
+ *   PI_BIN=$(which pi) ANTHROPIC_API_KEY=... \
+ *     npx vitest run src/__tests__/integration.test.ts -t "S[1-4]"
+ */
+describe("smoke tests (opt-in: set PI_BIN + an LLM API key)", () => {
+  // ── S3: pure render assertion (no pi binary needed) ──────────────────
+
+  it("S3: renderBoard renders all 100 tasks in expanded mode (no hard height cap)", () => {
+    const tasks = Array.from({ length: 100 }, (_, i) => makeSmokeTask(`task-${i}`, "done"));
+    const pool = makeSmokePool(tasks);
+    const theme = createMockTheme();
+
+    const container = renderBoard(pool, { expanded: true, isPartial: false }, theme);
+
+    const rows = container.children.filter((c): c is Text => c instanceof Text);
+    const rendered = rows.map((r) => r.render(80)[0] ?? "").join("\n");
+
+    // COLLAPSED_ROW_CAP (20) must NOT clip the board in expanded mode — every
+    // one of the 100 task ids must appear in the rendered output.
+    for (let i = 0; i < 100; i++) {
+      expect(rendered).toContain(`task-${i}`);
+    }
+  });
+
+  // ── S1: session file persistence in -p/--mode json (no --no-session) ──
+
+  (CAN_SMOKE ? it : it.skip)(
+    "S1: -p/--mode json persists a session file to --session-dir (no --no-session)",
+    { timeout: 180_000 },
+    async () => {
+      const sessionDir = mkdtempSync(join(tmpdir(), "pi-smoke-s1-"));
+      TEMP_DIRS.push(sessionDir);
+
+      const result = await runPi(
+        PI_BIN as string,
+        ["--mode", "json", "-p", "--session-dir", sessionDir],
+        { stdinPrompt: "Reply with exactly: ok", timeoutMs: 150_000 },
+      );
+
+      // pi ran cleanly and persisted a `.jsonl` session file under the dir.
+      expect(result.exitCode).toBe(0);
+      const sessions = findSessionFiles(sessionDir);
+      expect(sessions.length).toBeGreaterThan(0);
+    },
   );
 
-  it.todo(
-    "S2: `--session <flat-abs-path> --session-dir <parent>` resumes without " +
-      "MissingSessionCwdError and appends",
+  // ── S2: resume-by-path appends without a session-cwd mismatch ────────
+
+  (CAN_SMOKE ? it : it.skip)(
+    "S2: --session <flat-path> resumes without a cwd mismatch and appends",
+    { timeout: 240_000 },
+    async () => {
+      const sessionDir = mkdtempSync(join(tmpdir(), "pi-smoke-s2-"));
+      TEMP_DIRS.push(sessionDir);
+
+      // 1. Produce a session file (nested or flat — we search recursively).
+      const first = await runPi(
+        PI_BIN as string,
+        ["--mode", "json", "-p", "--session-dir", sessionDir],
+        { stdinPrompt: "Reply with exactly: first", timeoutMs: 150_000 },
+      );
+      expect(first.exitCode).toBe(0);
+      const sessions = findSessionFiles(sessionDir);
+      expect(sessions.length).toBeGreaterThan(0);
+
+      // 2. Flatten to a stable path — resume-by-path, §11/§12.
+      const flatPath = join(sessionDir, "resumed.jsonl");
+      copyFileSync(sessions[0]!, flatPath);
+      const sizeBefore = statSync(flatPath).size;
+
+      // 3. Resume from the flat path with a follow-up prompt.
+      const second = await runPi(
+        PI_BIN as string,
+        ["--mode", "json", "-p", "--session-dir", sessionDir, "--session", flatPath],
+        { stdinPrompt: "Reply with exactly: second", timeoutMs: 150_000 },
+      );
+
+      // No session-cwd mismatch error; clean exit.
+      expect(second.exitCode).toBe(0);
+      expect(second.stderr).not.toMatch(/MissingSessionCwdError/i);
+      expect(second.stderr).not.toMatch(/session[\s\S]*cwd[\s\S]*mismatch/i);
+
+      // 4. The resumed file grew/appended (compaction/auto-save didn't relocate).
+      const sizeAfter = statSync(flatPath).size;
+      expect(sizeAfter).toBeGreaterThan(sizeBefore);
+    },
   );
 
-  it.todo(
-    "S3: renderResult with 100 rows has no built-in height-cap clipping " + "(manual visual check)",
-  );
+  // ── S4: gate_verdict visible + callable by a spawned child ───────────
 
-  it.todo(
-    "S4: a spawned `pi -p` child can see + call gate_verdict (extension " +
-      "loaded via --extension injection)",
+  (CAN_SMOKE ? it : it.skip)(
+    "S4: a spawned pi -p child can see + call gate_verdict (result.details.approved is boolean)",
+    { timeout: 180_000 },
+    async () => {
+      // Absolute path to this extension's entry module (loaded via --extension).
+      const extensionPath = fileURLToPath(new URL("../index.ts", import.meta.url));
+
+      const result = await runPi(
+        PI_BIN as string,
+        ["--mode", "json", "-p", "--extension", extensionPath],
+        {
+          stdinPrompt:
+            "Call the gate_verdict tool now with approved=true and feedback='smoke test'. " +
+            "Do not do anything else.",
+          timeoutMs: 150_000,
+        },
+      );
+
+      expect(result.exitCode).toBe(0);
+
+      const gateEvents = result.events.filter(
+        (e) => e.type === "tool_execution_end" && e.toolName === "gate_verdict",
+      );
+      // gate_verdict MUST be visible to the spawned child — if it isn't, this
+      // fails (the whole point of the smoke test, §21 / finding C1).
+      expect(gateEvents.length).toBeGreaterThan(0);
+
+      // The verdict is nested under `result.details` (AgentToolResult<T> shape).
+      const firstEvent = gateEvents[0]!;
+      const eventResult = firstEvent.result as Record<string, unknown> | undefined;
+      const details = eventResult?.details as Record<string, unknown> | undefined;
+      expect(typeof details?.approved).toBe("boolean");
+    },
   );
 });

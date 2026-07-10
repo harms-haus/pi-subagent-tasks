@@ -86,7 +86,7 @@ describe("handleAgentError", () => {
     const cursor = buildCursor(undefined, "0");
     const t = task(cursor);
 
-    // SOFT_RETRY_CAP=5 soft-retries: 0→1, 1→2, 2→3, 3→4, 4→5
+    // SOFT_RETRY_CAP=4 soft-retries: 0→1, 1→2, 2→3, 3→4
     for (let i = 1; i <= SOFT_RETRY_CAP; i++) {
       const r = handleAgentError(t, "0", failResult(), { maxRetries: 2 });
       expect(r).toBe("soft-retry");
@@ -131,11 +131,11 @@ describe("handleAgentError", () => {
     const cursor = buildCursor(undefined, "0");
     const t = task(cursor);
 
-    // Exhaust L1 soft-retries: 5 calls (executionCount 0→1→2→3→4→5)
+    // Exhaust L1 soft-retries: 4 calls (executionCount 0→1→2→3→4)
     for (let i = 0; i < SOFT_RETRY_CAP; i++) {
       handleAgentError(t, "0", failResult(), { maxRetries: 2 });
     }
-    // executionCount = SOFT_RETRY_CAP (5); next error triggers L2
+    // executionCount = SOFT_RETRY_CAP (4); next error triggers L2
 
     const result = handleAgentError(t, "0", failResult(), { maxRetries: 2 });
     expect(result).toBe("task-restart");
@@ -157,7 +157,7 @@ describe("handleAgentError", () => {
     const cursor = buildCursor(undefined, "0");
     const t = task(cursor);
     const audit = vi.fn();
-    // Exhaust L1 (5 soft-retries)
+    // Exhaust L1 (4 soft-retries)
     for (let i = 0; i < SOFT_RETRY_CAP; i++) {
       handleAgentError(t, "0", failResult(), { maxRetries: 2, onAudit: audit });
     }

@@ -36,6 +36,9 @@ import type {
 } from "../types";
 import { SOFT_RETRY_CAP } from "../constants";
 
+/** Shared sessions dir for all compose-scheduler tests. */
+const SESSION_DIR = "/sessions";
+
 // ── Test helpers ────────────────────────────────────────────────────────────
 
 /** Flush all pending microtasks so fire-and-forget `.then()` callbacks settle. */
@@ -218,6 +221,7 @@ describe("compose scheduler integration", () => {
 
     const scheduler = createComposeScheduler({
       pool,
+      sessionDir: SESSION_DIR,
       pools: createPoolCoordinator(pool.limits),
       agentRunner: runner,
       onMergeEnqueue,
@@ -271,6 +275,7 @@ describe("compose scheduler integration", () => {
 
     const scheduler = createComposeScheduler({
       pool,
+      sessionDir: SESSION_DIR,
       pools: createPoolCoordinator(pool.limits),
       agentRunner: deferred.runner,
       onMergeEnqueue,
@@ -345,6 +350,7 @@ describe("compose scheduler integration", () => {
 
     const scheduler = createComposeScheduler({
       pool,
+      sessionDir: SESSION_DIR,
       pools: createPoolCoordinator(pool.limits),
       agentRunner: runner,
       onMergeEnqueue,
@@ -424,6 +430,7 @@ describe("compose scheduler integration", () => {
 
     const scheduler = createComposeScheduler({
       pool,
+      sessionDir: SESSION_DIR,
       pools: createPoolCoordinator(pool.limits),
       agentRunner: runner,
       onMergeEnqueue,
@@ -491,6 +498,7 @@ describe("compose scheduler integration", () => {
 
     const scheduler = createComposeScheduler({
       pool,
+      sessionDir: SESSION_DIR,
       pools: createPoolCoordinator(pool.limits),
       agentRunner: runner,
       onMergeEnqueue,
@@ -543,6 +551,7 @@ describe("compose scheduler integration", () => {
 
     const scheduler = createComposeScheduler({
       pool,
+      sessionDir: SESSION_DIR,
       pools: createPoolCoordinator(pool.limits),
       agentRunner: runner,
       onMergeEnqueue,
@@ -608,6 +617,7 @@ describe("compose scheduler integration", () => {
 
     const scheduler = createComposeScheduler({
       pool,
+      sessionDir: SESSION_DIR,
       pools: createPoolCoordinator(pool.limits),
       agentRunner: runner,
       onMergeEnqueue,
@@ -695,6 +705,7 @@ describe("compose scheduler integration", () => {
 
     const scheduler = createComposeScheduler({
       pool,
+      sessionDir: SESSION_DIR,
       pools: createPoolCoordinator(pool.limits),
       agentRunner: runner,
       onMergeEnqueue,
@@ -767,6 +778,7 @@ describe("compose scheduler integration", () => {
 
     const scheduler = createComposeScheduler({
       pool,
+      sessionDir: SESSION_DIR,
       pools: createPoolCoordinator(pool.limits),
       agentRunner: runner,
       onMergeEnqueue,
@@ -844,6 +856,7 @@ describe("compose scheduler integration", () => {
 
     const scheduler = createComposeScheduler({
       pool,
+      sessionDir: SESSION_DIR,
       pools: createPoolCoordinator(pool.limits),
       agentRunner: runner,
       onMergeEnqueue,
@@ -855,15 +868,15 @@ describe("compose scheduler integration", () => {
     await flush();
 
     // Expected progression:
-    //   L1 (soft-retry) ×5 → executionCount reaches SOFT_RETRY_CAP
+    //   L1 (soft-retry) ×4 → executionCount reaches SOFT_RETRY_CAP
     //   L2 (task-restart) ×1 → retryCount=1 (since maxRetries=1)
-    //   L1 (soft-retry) ×5 again → task restarted fresh
+    //   L1 (soft-retry) ×4 again → task restarted fresh
     //   L2 (task-restart) would need retryCount < 1, but it's now =1 → L3 (task-fail)
     // Actually with maxRetries=1: retryCount starts at 0.
     //   After 1st task-restart: retryCount=1. Next error: retryCount(1) < maxRetries(1)? No → L3.
     //
-    // So: 5 soft-retries (L1) + 1 task-restart (L2) + 5 soft-retries (L1 after restart) + 1 task-fail (L3)
-    //     = 12 total calls
+    // So: 4 soft-retries (L1) + 1 task-restart (L2) + 4 soft-retries (L1 after restart) + 1 task-fail (L3)
+    //     = 10 total calls
 
     // The `executionCount` resets when task-restarts because the cursor is rebuilt.
     // Actually, let me check: task-restart sets status to "ready" but does NOT reset the cursor.
@@ -888,18 +901,68 @@ describe("compose scheduler integration", () => {
     //   C2: agent fails → executionCount 1→2 → soft-retry
     //   C3: agent fails → executionCount 2→3 → soft-retry
     //   C4: agent fails → executionCount 3→4 → soft-retry
-    //   C5: agent fails → executionCount 4→5 → soft-retry
-    //   C6: agent fails → executionCount=5 (SOFT_RETRY_CAP), retryCount=0<1 → task-restart, retryCount=1
-    //   C7: agent fails → executionCount=5 (still), retryCount=1 not <1 → task-fail
+    //   C5: agent fails → executionCount=4 (SOFT_RETRY_CAP), retryCount=0<1 → task-restart, retryCount=1
+    //   C6: agent fails → executionCount=4 (still), retryCount=1 not <1 → task-fail
     //
-    // Total calls: 7 agent runs
+    // Total calls: 6 agent runs
 
     // Verify executionCount progression
-    expect(callCount).toBe(7);
+    expect(callCount).toBe(6);
     expect(cursor.executionCount).toBe(SOFT_RETRY_CAP);
     expect(task.retryCount).toBe(1);
     expect(task.status).toBe("failed");
     expect(task.lastError).toBeUndefined(); // task-fail doesn't set lastError in scheduler
     expect(scheduler.isComplete()).toBe(true);
+  });
+
+  // ── M1: session file recording ──────────────────────────────────────────
+  it("records session files on task.sessionFiles when agents succeed (M1)", async () => {
+    const cursor = buildCursor(
+      {
+        type: "sequential",
+        atoms: [{ type: "agent" }, { type: "agent" }],
+      },
+      "0",
+    );
+    const task = makeTask({
+      id: "t1",
+      prompt: "work",
+      compose: { type: "sequential", atoms: [{ type: "agent" }, { type: "agent" }] },
+      cursor,
+      status: "ready",
+    });
+    const pool = createPool({ tasks: [task] });
+
+    const runner: AgentRunner = {
+      runAgent: vi.fn(async (demand: AgentDemand): Promise<AgentRunResult> => {
+        return {
+          success: true,
+          lastText: `out-${demand.atomPath}`,
+          sessionFile: `/sessions/${demand.atomPath}.jsonl`,
+          exitCode: 0,
+          durationMs: 0,
+        };
+      }),
+    };
+
+    const { onMergeEnqueue, schedRef } = createSyncMergeStub(pool);
+
+    const scheduler = createComposeScheduler({
+      pool,
+      sessionDir: SESSION_DIR,
+      pools: createPoolCoordinator(pool.limits),
+      agentRunner: runner,
+      onMergeEnqueue,
+    });
+    schedRef.current = scheduler;
+
+    scheduler.globalSchedule();
+    await flush();
+
+    expect(task.status).toBe("done");
+    // Both agent runs recorded their session files on the task.
+    expect(task.sessionFiles).toContain("/sessions/0.0.jsonl");
+    expect(task.sessionFiles).toContain("/sessions/0.1.jsonl");
+    expect(task.sessionFiles).toHaveLength(2);
   });
 });

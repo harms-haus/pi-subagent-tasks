@@ -1,6 +1,6 @@
 import { describe, it, expect } from "vitest";
 
-import { resolveDeps, detectCycles, topoSort, computeDownstreamCount } from "../dag";
+import { resolveDeps, detectCycles, computeDownstreamCount } from "../dag";
 
 // ── resolveDeps ──────────────────────────────────────────────────────────────
 
@@ -163,54 +163,6 @@ describe("detectCycles", () => {
     const { idMap, assignedIds } = resolveDeps([{ id: "a", dependsOn: ["a"] }]);
     const cycle = detectCycles(assignedIds, idMap);
     expect(cycle).toBe("a → a");
-  });
-});
-
-// ── topoSort ─────────────────────────────────────────────────────────────────
-
-describe("topoSort", () => {
-  it("places every node after its dependencies", () => {
-    const deps = new Map([
-      ["a", []],
-      ["b", ["a"]],
-      ["c", ["a", "b"]],
-      ["d", ["c"]],
-    ]);
-    const order = topoSort(["a", "b", "c", "d"], deps);
-    const pos = new Map(order.map((id, i): [string, number] => [id, i]));
-    for (const [node, ds] of deps) {
-      for (const d of ds) {
-        expect(pos.get(node)).toBeGreaterThan(pos.get(d) ?? -1);
-      }
-    }
-  });
-
-  it("preserves declaration order among equal-precedence nodes (stable)", () => {
-    // q and p both depend on root; input order is root, q, p → output keeps q before p.
-    const deps = new Map([
-      ["root", []],
-      ["q", ["root"]],
-      ["p", ["root"]],
-    ]);
-    expect(topoSort(["root", "q", "p"], deps)).toEqual(["root", "q", "p"]);
-  });
-
-  it("preserves input order when there are no dependencies at all", () => {
-    const deps = new Map([
-      ["b", []],
-      ["a", []],
-    ]);
-    expect(topoSort(["b", "a"], deps)).toEqual(["b", "a"]);
-  });
-
-  it("still returns all nodes when a cycle blocks ordering", () => {
-    const deps = new Map([
-      ["a", ["b"]],
-      ["b", ["a"]],
-    ]);
-    const order = topoSort(["a", "b"], deps);
-    expect(order).toHaveLength(2);
-    expect(new Set(order)).toEqual(new Set(["a", "b"]));
   });
 });
 

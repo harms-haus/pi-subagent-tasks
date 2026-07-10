@@ -158,15 +158,39 @@ describe("spawnAgent", () => {
 
   // ── (b) gate_verdict ──────────────────────────────────────────────────
 
-  it("parses gate_verdict from tool_execution_end", async () => {
+  // Real platform shape: tool_execution_end.result is the full AgentToolResult<T>,
+  // i.e. { content: [...], details: { approved, feedback }, terminate? }.
+  it("parses gate_verdict from the real tool_execution_end result.details shape", async () => {
     const promise = spawnAgent(defaultOpts);
 
     feedAndExit([
-      `{"type":"tool_execution_end","toolName":"gate_verdict","result":{"approved":true,"feedback":"Looks good"}}`,
+      `{"type":"tool_execution_end","toolName":"gate_verdict","isError":false,"result":{"content":[{"type":"text","text":"Approved"}],"details":{"approved":true,"feedback":"Looks good"}}}`,
     ]);
 
     const result = await promise;
     expect(result.verdict).toEqual({ approved: true, feedback: "Looks good" });
+  });
+
+  it("parses a rejection verdict from result.details", async () => {
+    const promise = spawnAgent(defaultOpts);
+
+    feedAndExit([
+      `{"type":"tool_execution_end","toolName":"gate_verdict","isError":false,"result":{"content":[],"details":{"approved":false,"feedback":"Needs work"}}}`,
+    ]);
+
+    const result = await promise;
+    expect(result.verdict).toEqual({ approved: false, feedback: "Needs work" });
+  });
+
+  it("tolerates a flat result (no details) as a defensive fallback", async () => {
+    const promise = spawnAgent(defaultOpts);
+
+    feedAndExit([
+      `{"type":"tool_execution_end","toolName":"gate_verdict","result":{"approved":true,"feedback":"flat"}}`,
+    ]);
+
+    const result = await promise;
+    expect(result.verdict).toEqual({ approved: true, feedback: "flat" });
   });
 
   it("parses gate_verdict from args fallback when result is absent", async () => {
@@ -178,6 +202,28 @@ describe("spawnAgent", () => {
 
     const result = await promise;
     expect(result.verdict).toEqual({ approved: false, feedback: "Needs work" });
+  });
+
+  it("yields undefined when result has no details and no boolean approved", async () => {
+    const promise = spawnAgent(defaultOpts);
+
+    feedAndExit([
+      `{"type":"tool_execution_end","toolName":"gate_verdict","result":{"content":[{"type":"text","text":"done"}]}}`,
+    ]);
+
+    const result = await promise;
+    expect(result.verdict).toBeUndefined();
+  });
+
+  it("yields undefined when approved is not a boolean", async () => {
+    const promise = spawnAgent(defaultOpts);
+
+    feedAndExit([
+      `{"type":"tool_execution_end","toolName":"gate_verdict","result":{"content":[],"details":{"approved":"yes","feedback":"txt"}}}`,
+    ]);
+
+    const result = await promise;
+    expect(result.verdict).toBeUndefined();
   });
 
   it("ignores tool_execution_end for other tools", async () => {
@@ -480,9 +526,9 @@ describe("spawnAgent", () => {
   it("flushRemainders parses gate_verdict from partial stdout line", async () => {
     const promise = spawnAgent(defaultOpts);
 
-    // Partial JSON line (no trailing newline) containing a gate verdict
+    // Partial JSON line (no trailing newline) containing a real-shape gate verdict
     emitStdout(
-      `{"type":"tool_execution_end","toolName":"gate_verdict","result":{"approved":true,"feedback":"ok"}}`,
+      `{"type":"tool_execution_end","toolName":"gate_verdict","isError":false,"result":{"content":[],"details":{"approved":true,"feedback":"ok"}}}`,
     );
     emitExit(0);
     emitClose(0);

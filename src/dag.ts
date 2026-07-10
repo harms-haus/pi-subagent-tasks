@@ -11,7 +11,7 @@
  *   §7.3  priority = transitive downstream dependent count (computed once)
  *
  * Consumed as a pipeline at pool creation:
- *   resolveDeps → detectCycles → topoSort / computeDownstreamCount
+ *   resolveDeps → detectCycles → computeDownstreamCount
  */
 
 // ── Input shape (§6.1) ───────────────────────────────────────────────────────
@@ -168,66 +168,6 @@ export function detectCycles(taskIds: string[], deps: Map<string, string[]>): st
     }
   }
   return null;
-}
-
-// ── Topological sort (Kahn's, stable) ────────────────────────────────────────
-
-/**
- * Topologically order `taskIds` so every node follows its dependencies (§6.1).
- *
- * Uses Kahn's algorithm with a FIFO queue seeded in declaration order: siblings
- * unblocked at the same step preserve their relative declaration order. Should a
- * cycle leave nodes unordered, they are appended in declaration order so the
- * result is always a permutation of `taskIds` (cycles are caller-detected via
- * {@link detectCycles}).
- *
- * @returns the task ids in dependency-respecting, stable order.
- */
-export function topoSort(taskIds: string[], deps: Map<string, string[]>): string[] {
-  const idSet = new Set(taskIds);
-  const inDegree = new Map<string, number>();
-  const dependents = new Map<string, string[]>();
-  for (const id of taskIds) {
-    inDegree.set(id, 0);
-    dependents.set(id, []);
-  }
-
-  // in-degree[node] = number of in-graph deps; dependents[dep] = nodes needing it.
-  for (const id of taskIds) {
-    const seen = new Set<string>();
-    for (const dep of deps.get(id) ?? []) {
-      if (!idSet.has(dep) || seen.has(dep)) continue;
-      seen.add(dep);
-      inDegree.set(id, (inDegree.get(id) ?? 0) + 1);
-      dependents.get(dep)?.push(id);
-    }
-  }
-
-  // FIFO queue seeded in declaration order for stability.
-  const queue: string[] = [];
-  for (const id of taskIds) {
-    if ((inDegree.get(id) ?? 0) === 0) queue.push(id);
-  }
-
-  const result: string[] = [];
-  for (let head = 0; head < queue.length; head++) {
-    const node = queue[head] as string;
-    result.push(node);
-    for (const dependent of dependents.get(node) ?? []) {
-      const deg = (inDegree.get(dependent) ?? 0) - 1;
-      inDegree.set(dependent, deg);
-      if (deg === 0) queue.push(dependent);
-    }
-  }
-
-  // Append any cyclic leftovers in declaration order (completeness).
-  if (result.length < taskIds.length) {
-    const done = new Set(result);
-    for (const id of taskIds) {
-      if (!done.has(id)) result.push(id);
-    }
-  }
-  return result;
 }
 
 // ── Transitive downstream count (priority key, §7.3) ─────────────────────────

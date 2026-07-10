@@ -15,8 +15,15 @@ export const DEFAULT_TOTAL_LIMIT = 4;
 /** Default whole-task fresh-restart cap (D6, §17). */
 export const DEFAULT_MAX_RETRIES = 2;
 
-/** Per-agent soft-retry cap: allows up to 5 re-executions (resumes) before escalating to L2; total worst-case executions per atom = SOFT_RETRY_CAP + 1 = 6 (§8 level 1). */
-export const SOFT_RETRY_CAP = 5;
+/**
+ * Per-agent soft-retry cap: the maximum number of *retries* (resumed
+ * re-executions) allowed before escalating to L2 (§8 level 1).
+ *
+ * With this value at 4, an atom gets **5 total executions** (1 initial
+ * attempt + 4 soft-retries), matching the spec's "up to 5 total executions
+ * (1 attempt + 4 retries)."
+ */
+export const SOFT_RETRY_CAP = 4;
 
 /** Default gateLoop iteration cap (D8, §17). */
 export const DEFAULT_GATELOOP_MAX_ITERATIONS = 3;

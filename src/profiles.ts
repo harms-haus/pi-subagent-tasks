@@ -366,10 +366,14 @@ export function profileToArgs(profile: Profile): { args: string[]; env: Record<s
   // ── tools ─────────────────────────────────────────────────────────────
   if (profile.noTools) {
     args.push("--no-tools");
-  } else if (profile.tools && profile.tools.length > 0) {
-    args.push("--tools", profile.tools.join(","));
+  } else {
+    if (profile.tools && profile.tools.length > 0) {
+      args.push("--tools", profile.tools.join(","));
+    }
+    if (profile.excludeTools && profile.excludeTools.length > 0) {
+      args.push("--exclude-tools", profile.excludeTools.join(","));
+    }
   }
-  // excludeTools: not yet a standard pi-agent flag; omitted for now.
 
   // ── extensions ────────────────────────────────────────────────────────
   if (profile.noExtensions) {

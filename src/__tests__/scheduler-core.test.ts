@@ -14,12 +14,16 @@ import type { SchedulerCallbacks } from "../scheduler";
 import { createPoolCoordinator } from "../pools";
 import type {
   AgentDemand,
+  AgentRunOptions,
   AgentRunResult,
   AgentRunner,
   LimitsConfig,
   PoolState,
   TaskRuntime,
 } from "../types";
+
+/** Shared sessions dir for all scheduler-core tests. */
+const SESSION_DIR = "/sessions";
 
 // ── Test domain helpers ─────────────────────────────────────────────────────
 
@@ -234,6 +238,7 @@ describe("scheduler core", () => {
     const scheduler = createScheduler({
       pool,
       pools,
+      sessionDir: SESSION_DIR,
       agentRunner: {
         async runAgent() {
           return { success: true, lastText: "done", exitCode: 0, durationMs: 5 };
@@ -280,6 +285,7 @@ describe("scheduler core", () => {
     const scheduler = createScheduler({
       pool,
       pools,
+      sessionDir: SESSION_DIR,
       agentRunner: {
         async runAgent() {
           return { success: true, lastText: "done", exitCode: 0, durationMs: 5 };
@@ -344,7 +350,13 @@ describe("scheduler core", () => {
     };
 
     const pools = createPoolCoordinator(pool.limits);
-    const scheduler = createScheduler({ pool, pools, agentRunner: runner, callbacks });
+    const scheduler = createScheduler({
+      pool,
+      pools,
+      agentRunner: runner,
+      callbacks,
+      sessionDir: SESSION_DIR,
+    });
 
     // Pass 1: A starts, B stays blocked
     scheduler.globalSchedule();
@@ -405,7 +417,13 @@ describe("scheduler core", () => {
     };
 
     const pools = createPoolCoordinator(pool.limits);
-    const scheduler = createScheduler({ pool, pools, agentRunner: runner, callbacks });
+    const scheduler = createScheduler({
+      pool,
+      pools,
+      agentRunner: runner,
+      callbacks,
+      sessionDir: SESSION_DIR,
+    });
 
     // Pass 1: only t1 can acquire (total=1)
     scheduler.globalSchedule();
@@ -473,7 +491,13 @@ describe("scheduler core", () => {
     };
 
     const pools = createPoolCoordinator(pool.limits);
-    const scheduler = createScheduler({ pool, pools, agentRunner: runner, callbacks });
+    const scheduler = createScheduler({
+      pool,
+      pools,
+      agentRunner: runner,
+      callbacks,
+      sessionDir: SESSION_DIR,
+    });
 
     // Parked A should be scheduled before ready B
     scheduler.globalSchedule();
@@ -602,7 +626,13 @@ describe("scheduler core", () => {
     };
 
     const pools = createPoolCoordinator(limits);
-    const scheduler = createScheduler({ pool, pools, agentRunner: runner, callbacks });
+    const scheduler = createScheduler({
+      pool,
+      pools,
+      agentRunner: runner,
+      callbacks,
+      sessionDir: SESSION_DIR,
+    });
 
     // Pass 1: A atom1 + B start (anthropic=1/1, openai=1/1)
     scheduler.globalSchedule();
@@ -647,7 +677,13 @@ describe("scheduler core", () => {
 
     const callbacks = stubCallbacks();
     const pools = createPoolCoordinator(pool.limits);
-    const scheduler = createScheduler({ pool, pools, agentRunner: runner, callbacks });
+    const scheduler = createScheduler({
+      pool,
+      pools,
+      agentRunner: runner,
+      callbacks,
+      sessionDir: SESSION_DIR,
+    });
 
     // Before globalSchedule, isComplete should be false (no pass yet)
     expect(scheduler.isComplete()).toBe(false);
@@ -696,6 +732,7 @@ describe("scheduler core", () => {
     const scheduler = createScheduler({
       pool,
       pools,
+      sessionDir: SESSION_DIR,
       agentRunner: {
         async runAgent() {
           return { success: true, lastText: "done", exitCode: 0, durationMs: 0 };
@@ -754,6 +791,7 @@ describe("scheduler core", () => {
     const scheduler = createScheduler({
       pool,
       pools,
+      sessionDir: SESSION_DIR,
       agentRunner: {
         async runAgent() {
           return { success: true, lastText: "done", exitCode: 0, durationMs: 0 };
@@ -783,11 +821,93 @@ describe("scheduler core", () => {
     expect(pool.mergeQueue).toEqual(["t2"]);
     expect(scheduler.isComplete()).toBe(false);
 
-    // Complete the second merge — mergeInProgress was still true from
-    // the first, so the second merge didn't fire onMergeEnqueue yet.
-    // mergeComplete clears mergeInProgress when the queue empties.
+    // mergeComplete("t1") clears mergeInProgress per-item (C4 fix) and
+    // re-enters globalSchedule, which dispatches t2 to onMergeEnqueue.
+    // The merge worker then calls mergeComplete("t2") when it finishes.
     scheduler.mergeComplete("t2");
     expect(pool.mergeQueue).toEqual([]);
+    expect(scheduler.isComplete()).toBe(true);
+  });
+
+  // ── C4 regression: merge queue must not strand tasks queued mid-merge ──
+  it("dispatches the next queued task after a merge completes (no C4 deadlock)", async () => {
+    // Regression test for C4: when two tasks finish back-to-back and both
+    // land in pool.mergeQueue while a merge is in-flight, the second task
+    // must still be handed to onMergeEnqueue once the first merge
+    // completes. Previously mergeInProgress was only cleared when the
+    // entire queue drained, so the second task was never dispatched and
+    // the scheduler hung forever.
+    //
+    // onMergeEnqueue is a no-op (simulating an ASYNC merge worker) — the
+    // test drives completion via scheduler.mergeComplete(), mirroring the
+    // real mergeWorker.onMerged callback.
+    const pool = createPool({
+      limits: { total: 2, provider: {}, model: {} },
+      tasks: [makeTask({ id: "t1", status: "ready" }), makeTask({ id: "t2", status: "ready" })],
+    });
+
+    const onMergeEnqueue = vi.fn();
+
+    const callbacks: SchedulerCallbacks = {
+      getDemands: (task) =>
+        task.status === "done" || task.status === "failed"
+          ? []
+          : [
+              {
+                atomPath: "0",
+                profileName: "default",
+                effectivePrompt: task.prompt,
+                cwd: "",
+                taskId: task.id,
+              },
+            ],
+      advanceCursor: vi.fn(() => ({ composeComplete: true, needsMerge: true })),
+      handleAgentError: vi.fn(),
+      onMergeEnqueue,
+      onUpdate: vi.fn(),
+    };
+
+    const pools = createPoolCoordinator(pool.limits);
+    const scheduler = createScheduler({
+      pool,
+      pools,
+      sessionDir: SESSION_DIR,
+      agentRunner: {
+        async runAgent() {
+          return { success: true, lastText: "done", exitCode: 0, durationMs: 0 };
+        },
+      },
+      callbacks,
+    });
+
+    // Both agents start and finish immediately → both land in mergeQueue.
+    scheduler.globalSchedule();
+    await flushMicrotasks();
+
+    expect(pool.mergeQueue).toEqual(["t1", "t2"]);
+    // Only the head (t1) is dispatched while a merge is in-flight.
+    expect(onMergeEnqueue).toHaveBeenCalledTimes(1);
+    expect(onMergeEnqueue).toHaveBeenLastCalledWith("t1");
+
+    // Simulate the merge worker finishing t1's merge.
+    pool.tasks[0]!.status = "done";
+    scheduler.mergeComplete("t1");
+
+    // CRITICAL (C4): mergeComplete must clear mergeInProgress per-item so
+    // globalSchedule dispatches t2. Without the fix, onMergeEnqueue is
+    // never called for t2 and the scheduler hangs.
+    expect(pool.mergeQueue).toEqual(["t2"]);
+    expect(onMergeEnqueue).toHaveBeenCalledTimes(2);
+    expect(onMergeEnqueue).toHaveBeenLastCalledWith("t2");
+    expect(scheduler.isComplete()).toBe(false);
+
+    // Finish t2's merge → both done → fixed point reached.
+    pool.tasks[1]!.status = "done";
+    scheduler.mergeComplete("t2");
+
+    expect(pool.mergeQueue).toEqual([]);
+    expect(onMergeEnqueue).toHaveBeenCalledTimes(2);
+    expect(pool.tasks.every((t) => t.status === "done")).toBe(true);
     expect(scheduler.isComplete()).toBe(true);
   });
 
@@ -854,6 +974,7 @@ describe("scheduler core", () => {
     const scheduler = createScheduler({
       pool,
       pools,
+      sessionDir: SESSION_DIR,
       agentRunner: runner,
       callbacks,
     });
@@ -916,6 +1037,7 @@ describe("scheduler core", () => {
     const scheduler = createScheduler({
       pool,
       pools,
+      sessionDir: SESSION_DIR,
       agentRunner: {
         async runAgent() {
           return { success: true, lastText: "done", exitCode: 0, durationMs: 0 };
@@ -990,7 +1112,13 @@ describe("scheduler core", () => {
     const { runner, resolve: resolveDeferred } = createDeferredRunner(["many", "few"]);
 
     const pools = createPoolCoordinator(pool.limits);
-    const scheduler = createScheduler({ pool, pools, agentRunner: runner, callbacks });
+    const scheduler = createScheduler({
+      pool,
+      pools,
+      agentRunner: runner,
+      callbacks,
+      sessionDir: SESSION_DIR,
+    });
 
     // "few" (1 dep) should be sorted before "many" (3 deps).
     scheduler.globalSchedule();
@@ -1030,6 +1158,7 @@ describe("scheduler core", () => {
     const scheduler = createScheduler({
       pool,
       pools,
+      sessionDir: SESSION_DIR,
       agentRunner: runner,
       callbacks: stubCallbacks(),
     });
@@ -1097,7 +1226,13 @@ describe("scheduler core", () => {
     };
 
     const pools = createPoolCoordinator(pool.limits);
-    const scheduler = createScheduler({ pool, pools, agentRunner: runner, callbacks });
+    const scheduler = createScheduler({
+      pool,
+      pools,
+      agentRunner: runner,
+      callbacks,
+      sessionDir: SESSION_DIR,
+    });
 
     scheduler.globalSchedule();
     expect(pool.tasks[0]!.status).toBe("running");
@@ -1156,7 +1291,13 @@ describe("scheduler core", () => {
     };
 
     const pools = createPoolCoordinator(pool.limits);
-    const scheduler = createScheduler({ pool, pools, agentRunner: runner, callbacks });
+    const scheduler = createScheduler({
+      pool,
+      pools,
+      agentRunner: runner,
+      callbacks,
+      sessionDir: SESSION_DIR,
+    });
 
     scheduler.globalSchedule();
     expect(pool.tasks[0]!.status).toBe("running");
@@ -1267,7 +1408,13 @@ describe("scheduler core", () => {
     };
 
     const pools = createPoolCoordinator(pool.limits);
-    const scheduler = createScheduler({ pool, pools, agentRunner: runner, callbacks });
+    const scheduler = createScheduler({
+      pool,
+      pools,
+      agentRunner: runner,
+      callbacks,
+      sessionDir: SESSION_DIR,
+    });
 
     // Start both parallel atoms
     scheduler.globalSchedule();
@@ -1344,7 +1491,13 @@ describe("scheduler core", () => {
     };
 
     const pools = createPoolCoordinator(pool.limits);
-    const scheduler = createScheduler({ pool, pools, agentRunner: runner, callbacks });
+    const scheduler = createScheduler({
+      pool,
+      pools,
+      agentRunner: runner,
+      callbacks,
+      sessionDir: SESSION_DIR,
+    });
 
     scheduler.globalSchedule();
     expect(pool.tasks[0]!.status).toBe("running");
@@ -1379,6 +1532,7 @@ describe("scheduler core", () => {
     const scheduler = createScheduler({
       pool,
       pools,
+      sessionDir: SESSION_DIR,
       agentRunner: runner,
       callbacks,
       signal: abortController.signal,
@@ -1418,6 +1572,7 @@ describe("scheduler core", () => {
     const scheduler = createScheduler({
       pool,
       pools,
+      sessionDir: SESSION_DIR,
       agentRunner: runner,
       callbacks,
       signal: abortController.signal,
@@ -1469,7 +1624,13 @@ describe("scheduler core", () => {
     });
 
     const pools = createPoolCoordinator(pool.limits);
-    const scheduler = createScheduler({ pool, pools, agentRunner: runner, callbacks });
+    const scheduler = createScheduler({
+      pool,
+      pools,
+      agentRunner: runner,
+      callbacks,
+      sessionDir: SESSION_DIR,
+    });
 
     // Calling onAgentFinished with a non-existent taskId should not throw.
     void scheduler.onAgentFinished("nonexistent", "0", {
@@ -1507,7 +1668,13 @@ describe("scheduler core", () => {
     });
 
     const pools = createPoolCoordinator(pool.limits);
-    const scheduler = createScheduler({ pool, pools, agentRunner: runner, callbacks });
+    const scheduler = createScheduler({
+      pool,
+      pools,
+      agentRunner: runner,
+      callbacks,
+      sessionDir: SESSION_DIR,
+    });
 
     // Start the task normally
     scheduler.globalSchedule();
@@ -1527,5 +1694,99 @@ describe("scheduler core", () => {
     // have been changed by the incomplete merge flow.
     // We just verify no crash occurred.
     expect(pool.tasks[0]!.runningAgentCount).toBeGreaterThanOrEqual(0);
+  });
+
+  // ── C2: sessionDir threading ───────────────────────────────────────
+  it("forwards the configured sessionDir into AgentRunOptions passed to the runner", async () => {
+    // Regression guard for finding C2: the scheduler must forward its
+    // sessionDir option into the AgentRunOptions so that task agents
+    // persist sessions, enabling resume and the summary's session listing.
+    const SESSION_DIR_C2 = "/pool/sessions";
+
+    const receivedOpts: AgentRunOptions[] = [];
+    const runner: AgentRunner = {
+      async runAgent(_demand: AgentDemand, opts: AgentRunOptions): Promise<AgentRunResult> {
+        receivedOpts.push(opts);
+        return { success: true, lastText: "done", exitCode: 0, durationMs: 0 };
+      },
+    };
+
+    const pool = createPool({
+      tasks: [makeTask({ id: "t1", status: "ready" })],
+    });
+
+    const callbacks = stubCallbacks({
+      onMergeEnqueue: (taskId) => {
+        const task = pool.tasks.find((t) => t.id === taskId);
+        if (task) task.status = "done";
+        const idx = pool.mergeQueue.indexOf(taskId);
+        if (idx >= 0) pool.mergeQueue.splice(idx, 1);
+      },
+    });
+
+    const pools = createPoolCoordinator(pool.limits);
+    const scheduler = createScheduler({
+      pool,
+      pools,
+      agentRunner: runner,
+      sessionDir: SESSION_DIR_C2,
+      callbacks,
+    });
+
+    scheduler.globalSchedule();
+    await flushMicrotasks();
+
+    // The runner was called and received the real sessionDir (not "").
+    expect(receivedOpts.length).toBeGreaterThanOrEqual(1);
+    expect(receivedOpts[0]!.sessionDir).toBe(SESSION_DIR_C2);
+  });
+
+  // ── M1: session file recording ─────────────────────────────────────
+  it("records the produced session file on task.sessionFiles after a successful run", async () => {
+    // Regression guard for finding M1: when an agent finishes successfully
+    // and its result carries a sessionFile, the scheduler must record it on
+    // the task's sessionFiles list so it shows up in state.json and the
+    // final summary's (session: ...) line.
+    const SESSION_FILE = "/pool/sessions/20260710T120000Z-my-task.jsonl";
+
+    const runner: AgentRunner = {
+      async runAgent(): Promise<AgentRunResult> {
+        return {
+          success: true,
+          lastText: "done",
+          exitCode: 0,
+          durationMs: 0,
+          sessionFile: SESSION_FILE,
+        };
+      },
+    };
+
+    const pool = createPool({
+      tasks: [makeTask({ id: "t1", status: "ready" })],
+    });
+
+    const callbacks = stubCallbacks({
+      onMergeEnqueue: (taskId) => {
+        const task = pool.tasks.find((t) => t.id === taskId);
+        if (task) task.status = "done";
+        const idx = pool.mergeQueue.indexOf(taskId);
+        if (idx >= 0) pool.mergeQueue.splice(idx, 1);
+      },
+    });
+
+    const pools = createPoolCoordinator(pool.limits);
+    const scheduler = createScheduler({
+      pool,
+      pools,
+      agentRunner: runner,
+      sessionDir: SESSION_DIR,
+      callbacks,
+    });
+
+    scheduler.globalSchedule();
+    await flushMicrotasks();
+
+    expect(pool.tasks[0]!.status).toBe("done");
+    expect(pool.tasks[0]!.sessionFiles).toEqual([SESSION_FILE]);
   });
 });

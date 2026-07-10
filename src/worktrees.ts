@@ -15,7 +15,7 @@ import { dirname, join } from "node:path";
 
 import type { GitOps } from "./git-op";
 import type { PoolState } from "./types";
-import { BRANCH_PREFIX, FALLBACK_WT_DIR_REL } from "./constants";
+import { BRANCH_PREFIX } from "./constants";
 import { poolDir } from "./utils";
 
 // ── Worktree creation (§10.1) ────────────────────────────────────────────────
@@ -139,16 +139,6 @@ export async function ensureExcludeEntry(git: GitOps, cwd: string): Promise<void
 // ── Detection helpers ────────────────────────────────────────────────────────
 
 /**
- * Fallback worktree directory when the primary tree is missing or unusable.
- *
- * Returns `<cwd>/.git/pi-task-pools/<poolId>/worktrees`.
- * Mirrors the convention from pi-worktrees (§10.5).
- */
-export function fallbackWorktreeDir(cwd: string, poolId: string): string {
-  return join(cwd, FALLBACK_WT_DIR_REL, poolId, "worktrees");
-}
-
-/**
  * Quick check: is `cwd` inside a git repository?
  *
  * Runs `git rev-parse --is-inside-work-tree` and returns `true` when the
@@ -182,11 +172,34 @@ export async function canUseWorktrees(git: GitOps, cwd: string): Promise<boolean
 // ── Verification (§10.4) ─────────────────────────────────────────────────────
 
 /**
+ * Result of {@link verifyWorktrees}: the split between externally-missing
+ * worktrees and stale-base worktrees.
+ */
+export interface WorktreeVerification {
+  /** Task ids whose `worktreePath` is absent from `git worktree list`. */
+  missing: string[];
+  /**
+   * Task ids whose worktree EXISTS but was branched from an old pool HEAD
+   * (the pool branch advanced via merges after the worktree was created).
+   * A dependent task in this state may not see its parents' merged code.
+   */
+  stale: string[];
+}
+
+/**
  * Verify the state of pool worktrees against the on-disk git worktree list.
  *
- * Returns an array of task ids whose `worktreePath` (as stored in the pool
- * state) is **missing** from the actual `git worktree list` output. These
- * are tasks whose worktrees have been externally deleted or corrupted.
+ * Detects two classes of problem:
+ *
+ * 1. **Missing** — the task's `worktreePath` (stored in pool state) is absent
+ *    from `git worktree list`. The worktree was externally deleted or
+ *    corrupted.
+ *
+ * 2. **Stale-base** — the worktree exists but its HEAD does not have the
+ *    current pool HEAD as an ancestor (`git merge-base --is-ancestor` returns
+ *    non-zero). This means the pool branch advanced (via merges) after the
+ *    worktree was created, so a dependent task may be missing its parents'
+ *    merged code (D10 / §10.1).
  *
  * This can be used on pool load / resume to detect stale state and trigger
  * cleanup or recreation.
@@ -195,11 +208,58 @@ export async function verifyWorktrees(
   git: GitOps,
   pool: PoolState,
   cwd: string,
-): Promise<string[]> {
+): Promise<WorktreeVerification> {
   const list = await git.worktreeList(cwd);
   const existingPaths = new Set(list.map((w) => w.path));
 
-  return pool.tasks
-    .filter((t) => t.worktreePath !== null && !existingPaths.has(t.worktreePath))
-    .map((t) => t.id);
+  // Map worktree path → HEAD SHA for stale-base detection.
+  const pathToHead = new Map<string, string>();
+  for (const w of list) {
+    if (w.head) {
+      pathToHead.set(w.path, w.head);
+    }
+  }
+
+  const missing: string[] = [];
+  const staleCandidates: Array<{ id: string; head: string }> = [];
+
+  for (const t of pool.tasks) {
+    if (t.worktreePath === null) continue;
+    if (!existingPaths.has(t.worktreePath)) {
+      missing.push(t.id);
+      continue;
+    }
+    // Worktree exists — record its HEAD for the stale-base check below.
+    const taskHead = pathToHead.get(t.worktreePath);
+    if (taskHead) {
+      staleCandidates.push({ id: t.id, head: taskHead });
+    }
+  }
+
+  // Only resolve the pool HEAD when there is at least one candidate to
+  // check (avoids a needless git call for the common all-present case).
+  const stale: string[] = [];
+  if (staleCandidates.length > 0) {
+    const poolHead = await git.revParseHead(pool.poolWorktree);
+    for (const candidate of staleCandidates) {
+      // exit 0  = poolHead IS an ancestor of taskHead → NOT stale.
+      // exit !=0 = poolHead is NOT an ancestor → stale (pool advanced).
+      let isStale: boolean;
+      try {
+        const r = await git.gitExec(["merge-base", "--is-ancestor", poolHead, candidate.head], cwd);
+        // exit 0  = poolHead IS an ancestor of taskHead → NOT stale.
+        // exit !=0 = poolHead is NOT an ancestor → stale (pool advanced).
+        isStale = r.code !== 0;
+      } catch {
+        // git error (bad ref, etc.) — conservatively treat as not stale so
+        // we never destroy a worktree we couldn't verify.
+        isStale = false;
+      }
+      if (isStale) {
+        stale.push(candidate.id);
+      }
+    }
+  }
+
+  return { missing, stale };
 }

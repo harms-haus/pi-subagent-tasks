@@ -30,12 +30,13 @@ import type {
 } from "./types";
 import type { PoolCoordinator } from "./pools";
 import { canTransition, depsAllDone, isFixedPoint } from "./status";
-import { nextWantedAgents, advanceComposeCursor } from "./atoms";
+import { nextWantedAgents, advanceComposeCursor, type ProfileResolver } from "./atoms";
 import type { AdvanceHandlers } from "./atoms";
 import { handleGateLoopResult, needsReminderRetry, buildReviewerReminder } from "./gateloop";
 import { handleAgentError as retryHandleAgentError } from "./retry";
 import { resetCursorToPending } from "./cursor";
 import { gateLoopParentPath } from "./atoms";
+import { recordSessionPath } from "./sessions";
 import { DEFAULT_MAX_RETRIES } from "./constants";
 
 // ── Callbacks ───────────────────────────────────────────────────────────────
@@ -110,6 +111,21 @@ export interface SchedulerCallbacks {
   onTaskRestart?: (task: TaskRuntime) => Promise<void> | void;
 
   /**
+   * Lazily create a worktree for a task on first start (D10 / §10.1).
+   *
+   * Called by {@link Scheduler.ensureWorktrees} for each task that is
+   * ready/parked, has all dependencies done, and does NOT yet have a
+   * worktree (`worktreePath === null`). The callback should create a
+   * task worktree branched from the pool's CURRENT HEAD (so dependent
+   * tasks see their merged parents' code), set `task.worktreePath` and
+   * `task.branch`, and persist state. May be async.
+   *
+   * When omitted, the scheduler assumes worktrees are managed externally
+   * (e.g. created eagerly at pool construction) and does nothing.
+   */
+  onEnsureWorktree?: (task: TaskRuntime) => Promise<void> | void;
+
+  /**
    * Fired after every state mutation so the TUI / persistence layer can react.
    */
   onUpdate: () => void;
@@ -124,8 +140,13 @@ export interface SchedulerOptions {
   pools: PoolCoordinator;
   /** Agent runner seam (real or mock). */
   agentRunner: AgentRunner;
+  /** Pool sessions directory — passed to every spawned agent for persistence (D11). */
+  sessionDir: string;
   /** Callbacks bridging to compose execution. */
   callbacks: SchedulerCallbacks;
+  /** Optional audit callback for lifecycle events (agent_start, task_running,
+   *  task_parked, limit_blocked, etc.). See §15 taxonomy (H3). */
+  onAudit?: (type: string, payload: Record<string, unknown>) => void;
   /** Optional abort signal; when aborted the scheduler stops starting agents. */
   signal?: AbortSignal;
 }
@@ -155,8 +176,8 @@ export interface Scheduler {
    *
    * The async merge worker MUST call this when its merge finishes. The
    * scheduler removes `taskId` from the merge queue, clears the
-   * merge-in-progress flag if the queue is now empty, and triggers a fresh
-   * scheduling pass.
+   * merge-in-progress flag (per-item, so the next queued task is
+   * dispatched), and triggers a fresh scheduling pass.
    */
   mergeComplete(taskId: string): void;
 
@@ -165,6 +186,21 @@ export interface Scheduler {
 
   /** Number of agents currently in-flight (across all tasks). */
   getInFlightCount(): number;
+
+  /**
+   * Lazily create worktrees for tasks that are ready to start but don't
+   * yet have one (D10 / §10.1, H1).
+   *
+   * For each task whose status is `"ready"` or `"parked"`, whose
+   * dependencies are all done, and whose `worktreePath` is `null`, this
+   * awaits {@link SchedulerCallbacks.onEnsureWorktree}. After processing
+   * all matching tasks, a single {@link Scheduler.globalSchedule} pass is
+   * triggered so the newly-worktree'd tasks can start their agents.
+   *
+   * Does nothing when there is no `onEnsureWorktree` callback or no
+   * matching tasks.
+   */
+  ensureWorktrees(): Promise<void>;
 }
 
 // ── Implementation ──────────────────────────────────────────────────────────
@@ -240,7 +276,25 @@ export function createScheduler(opts: SchedulerOptions): Scheduler {
       if (inFlight.has(key)) continue;
 
       // All-or-nothing acquire: if the pool has room, the slot is ours.
-      if (!opts.pools.tryAcquire(demand.provider, demand.model)) continue;
+      if (!opts.pools.tryAcquire(demand.provider, demand.model)) {
+        // Emit limit_blocked so the operator knows why the agent didn't start (H3).
+        opts.onAudit?.("limit_blocked", {
+          taskId: task.id,
+          atomPath: demand.atomPath,
+          provider: demand.provider,
+          model: demand.model,
+        });
+        continue;
+      }
+
+      // Emit agent_start (H3).
+      opts.onAudit?.("agent_start", {
+        taskId: task.id,
+        atomPath: demand.atomPath,
+        profile: demand.profileName,
+        provider: demand.provider,
+        model: demand.model,
+      });
 
       task.runningAgentCount++;
       demandMeta.set(key, {
@@ -250,7 +304,7 @@ export function createScheduler(opts: SchedulerOptions): Scheduler {
 
       const p = opts.agentRunner
         .runAgent(demand, {
-          sessionDir: "",
+          sessionDir: opts.sessionDir,
           poolId: opts.pool.id,
           signal: opts.signal,
         })
@@ -296,9 +350,33 @@ export function createScheduler(opts: SchedulerOptions): Scheduler {
     // Release pool slots and decrement running agent count.
     releaseAgent(taskId, atomPath);
 
+    // Emit agent lifecycle events (H3).
+    if (result.success) {
+      opts.onAudit?.("agent_complete", {
+        taskId,
+        atomPath,
+        sessionFile: result.sessionFile,
+      });
+    } else {
+      opts.onAudit?.("agent_error", {
+        taskId,
+        atomPath,
+        exitCode: result.exitCode,
+        error: result.error,
+      });
+    }
+
     if (result.success) {
       // Advance the compose cursor.
       const { composeComplete, needsMerge } = opts.callbacks.advanceCursor(task, atomPath, result);
+
+      // Record the produced session file on the task so it appears in
+      // state.json and the final summary's (session: ...) line (M1).
+      // Done here in the core scheduler so it is recorded regardless of
+      // which advanceCursor callback is supplied.
+      if (result.sessionFile) {
+        recordSessionPath(opts.pool, task.id, result.sessionFile);
+      }
 
       // Always enqueue for merge when compose is complete — even when
       // needsMerge is false — otherwise the task stays "running" with 0
@@ -361,6 +439,7 @@ export function createScheduler(opts: SchedulerOptions): Scheduler {
         // in the "running" state.
         if (canTransition(task.status, "running")) {
           task.status = "running";
+          opts.onAudit?.("task_running", { taskId: task.id });
         }
       } else {
         // Nothing running and nothing was started. Check if the task still
@@ -368,6 +447,7 @@ export function createScheduler(opts: SchedulerOptions): Scheduler {
         // Parking invariant: only running→parked (never ready→parked).
         if (task.status === "running") {
           task.status = "parked";
+          opts.onAudit?.("task_parked", { taskId: task.id });
         }
         // If status is not "running" (e.g. "ready" with nothing to do), stay
         // as-is. The next globalSchedule pass may advance it.
@@ -450,6 +530,7 @@ export function createScheduler(opts: SchedulerOptions): Scheduler {
 
         if (started && canTransition(prevStatus, "running")) {
           candidate.status = "running";
+          opts.onAudit?.("task_running", { taskId: candidate.id });
         }
       }
 
@@ -475,12 +556,53 @@ export function createScheduler(opts: SchedulerOptions): Scheduler {
       opts.pool.mergeQueue.splice(idx, 1);
     }
 
-    if (opts.pool.mergeQueue.length === 0) {
-      mergeInProgress = false;
-    }
+    // Clear mergeInProgress per-item (not only when the queue empties) so
+    // that the globalSchedule() call below can dispatch the next queued
+    // task. Previously this flag was only cleared once the entire
+    // mergeQueue drained, which stranded any task pushed to the queue
+    // while a merge was in-flight: the task was never handed to
+    // onMergeEnqueue and the scheduler hung forever (C4).
+    mergeInProgress = false;
 
     globalSchedule();
     opts.callbacks.onUpdate();
+  }
+
+  // ── ensureWorktrees (H1 / D10 / §10.1) ───────────────────────────────
+
+  /**
+   * Lazily create worktrees for tasks that are ready to start but don't
+   * yet have one.
+   *
+   * Matches tasks whose status is `"ready"` or `"parked"`, whose
+   * dependencies are all done, and whose `worktreePath` is still `null`.
+   * For each, awaits {@link SchedulerCallbacks.onEnsureWorktree}. After
+   * all matching tasks are processed, runs a single {@link globalSchedule}
+   * pass so the newly-worktree'd tasks can begin executing.
+   *
+   * This is the mechanism that honours D10: a dependent task only gets a
+   * worktree once its parents are merged (depsAllDone), branched from the
+   * pool's current HEAD — so it sees its parents' code.
+   */
+  async function ensureWorktreesImpl(): Promise<void> {
+    const cb = opts.callbacks.onEnsureWorktree;
+    if (cb === undefined) return;
+
+    const taskMap = buildTaskMap();
+    const toEnsure = opts.pool.tasks.filter(
+      (t) =>
+        (t.status === "ready" || t.status === "parked") &&
+        t.worktreePath === null &&
+        depsAllDone(t, taskMap),
+    );
+    if (toEnsure.length === 0) return;
+
+    for (const task of toEnsure) {
+      await cb(task);
+    }
+
+    // Re-run scheduling so the newly-worktree'd tasks can start.
+    globalSchedule();
   }
 
   // ── Public API ──────────────────────────────────────────────────────────
@@ -489,6 +611,7 @@ export function createScheduler(opts: SchedulerOptions): Scheduler {
     globalSchedule,
     onAgentFinished,
     mergeComplete: onMergeComplete,
+    ensureWorktrees: ensureWorktreesImpl,
     isComplete(): boolean {
       // When aborted, also require that no agents are in-flight — the abort
       // handler sets complete=true but in-flight agents may still need cleanup.
@@ -534,6 +657,15 @@ export interface ComposeSchedulerOptions {
   onMergeEnqueue?: (taskId: string) => void;
   /** Fired after every state mutation (TUI / persistence). Default no-op. */
   onUpdate?: () => void;
+  /** Pool sessions directory — forwarded to every spawned agent for persistence (D11). */
+  sessionDir: string;
+  /**
+   * Optional sync profile resolver used to populate each demand's
+   * `provider`/`model` so the 3-pool AND-gated limits (D7) are enforced on
+   * provider and model, not just `total`. When omitted, demands carry no
+   * provider/model and only the `total` pool is consulted.
+   */
+  profileResolver?: ProfileResolver;
   /** Optional audit callback for lifecycle events (retries, gateLoop, etc.). */
   onAudit?: (type: string, payload: Record<string, unknown>) => void;
   /**
@@ -544,6 +676,15 @@ export interface ComposeSchedulerOptions {
    * May be async — the scheduler awaits the returned promise.
    */
   onTaskRestart?: (task: TaskRuntime) => Promise<void> | void;
+  /**
+   * Lazily create a worktree for a task on first start (D10 / §10.1, H1).
+   *
+   * Called by {@link Scheduler.ensureWorktrees} for each ready/parked task
+   * with all dependencies done and no worktree yet. The callback should
+   * create a task worktree from the pool's current HEAD, set
+   * `task.worktreePath`/`task.branch`, and persist state. May be async.
+   */
+  onEnsureWorktree?: (task: TaskRuntime) => Promise<void> | void;
   /** Optional abort signal. */
   signal?: AbortSignal;
 }
@@ -596,7 +737,7 @@ export function createComposeScheduler(opts: ComposeSchedulerOptions): Scheduler
   // Wrap nextWantedAgents to inject review reminders when needed.
 
   function getDemands(task: TaskRuntime): AgentDemand[] {
-    const demands = nextWantedAgents(task);
+    const demands = nextWantedAgents(task, opts.profileResolver);
     for (const demand of demands) {
       // Check if this demand targets a review sub-cursor with a pending
       // reminder. The reminder was set by handleGateLoop when the previous
@@ -703,19 +844,23 @@ export function createComposeScheduler(opts: ComposeSchedulerOptions): Scheduler
     });
 
   const onTaskRestart = opts.onTaskRestart;
+  const onEnsureWorktree = opts.onEnsureWorktree;
 
   return createScheduler({
     pool: opts.pool,
     pools: opts.pools,
     agentRunner: opts.agentRunner,
+    sessionDir: opts.sessionDir,
     callbacks: {
       getDemands,
       advanceCursor,
       handleAgentError: handleAgentErrorCallback,
       onMergeEnqueue,
       onTaskRestart,
+      onEnsureWorktree,
       onUpdate,
     },
+    onAudit,
     signal: opts.signal,
   });
 }

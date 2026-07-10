@@ -512,13 +512,13 @@ Two-level retry model:
 
 When an individual agent process errors (nonzero exit, crash, idle timeout, loop
 detected, or gateLoop maxIterations exhausted), the same agent is retried by
-**resuming its existing session** (native `pi --session <path>`), up to **6
-total executions** (1 initial attempt + up to 5 soft-retries). Audit `agent_retry` is logged per
+**resuming its existing session** (native `pi --session <path>`), up to **5
+total executions** (1 initial attempt + up to 4 soft-retries). Audit `agent_retry` is logged per
 retry.
 
 ### Level 2 — whole-task fresh restart
 
-If the agent still fails after 6 total executions, that is a **task-attempt failure**:
+If the agent still fails after 5 total executions, that is a **task-attempt failure**:
 
 - If `retryCount <= maxRetries` (default `2`): **fresh restart** — up to
   `maxRetries` whole-task fresh restarts (i.e. 3 total task attempts before

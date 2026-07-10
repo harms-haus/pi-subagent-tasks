@@ -186,7 +186,7 @@ describe("buildCursor", () => {
 
   it("throws on unknown type (assertNever defense)", () => {
     expect(() => buildCursor({ type: "bogus" } as unknown as ComposeAtom, "0")).toThrow(
-      "Unexpected compose kind",
+      "Unexpected value",
     );
   });
 });
@@ -424,7 +424,7 @@ describe("isComposeComplete", () => {
   it("throws on unknown kind (assertNever defense)", () => {
     const bad = buildCursor({ type: "agent" }, "0");
     (bad as { kind: string }).kind = "bogus";
-    expect(() => isComposeComplete(bad)).toThrow("Unexpected compose kind");
+    expect(() => isComposeComplete(bad)).toThrow("Unexpected value");
   });
 });
 

@@ -4,6 +4,7 @@
  * Retry model (§8):
  *   Level 1 — per-agent soft-retry: re-run the same atom up to
  *             {@link SOFT_RETRY_CAP} times (each subsequent run is a resume).
+ *             Total executions per atom = SOFT_RETRY_CAP + 1 = 5.
  *   Level 2 — whole-task fresh restart: recreate the task worktree and restart
  *             all atoms from scratch, up to {@link opts.maxRetries}.
  *   Level 3 — permanent task failure.

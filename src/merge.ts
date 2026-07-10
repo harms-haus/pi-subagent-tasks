@@ -18,6 +18,17 @@ import type { AgentDemand, AgentRunner, AgentRunOptions, TaskRuntime } from "./t
 import type { PoolCoordinator } from "./pools";
 import { removeTaskWorktree } from "./worktrees";
 
+// ── Slot-acquire tuning (merge-helper) ───────────────────────────────────────
+
+/** Delay between merge-helper slot-acquire attempts while the pool is full. */
+export const HELPER_ACQUIRE_POLL_MS = 50;
+/**
+ * Maximum time to wait for a merge-helper slot before giving up and failing
+ * the merge. Generous bound so a temporarily-full pool can drain, while a
+ * permanently-full pool fails the merge instead of hanging the serial queue.
+ */
+export const HELPER_ACQUIRE_TIMEOUT_MS = 5 * 60 * 1000;
+
 // ── Options ──────────────────────────────────────────────────────────────────
 
 export interface MergeWorkerOptions {
@@ -31,6 +42,10 @@ export interface MergeWorkerOptions {
   sessionDir: string;
   /** Concurrency-pool coordinator (for merge-helper slot accounting). */
   pools: PoolCoordinator;
+  /** Optional abort signal, honoured while waiting for a merge-helper slot. */
+  signal?: AbortSignal;
+  /** Repository root cwd (retained for merge-helper context). */
+  cwd: string;
   /** Pool id (for audit events). */
   poolId: string;
   /** Look up a task by id from the pool's in-memory state. */
@@ -152,6 +167,7 @@ export function createMergeWorker(opts: MergeWorkerOptions): MergeWorker {
     }
 
     // ── Step 2: dirty check ─────────────────────────────────────────────
+    opts.audit("merge_started", { taskId });
     const status = await opts.git.statusPorcelain(worktreePath);
     if (status.trim().length > 0) {
       await opts.git.commitAll("WIP: auto-commit before merge", worktreePath);
@@ -203,8 +219,10 @@ export function createMergeWorker(opts: MergeWorkerOptions): MergeWorker {
    * Handle a merge conflict: check for files with unmerged conflicts, spawn
    * a merge-helper agent, then check whether conflicts remain.
    *
-   * Pool slot accounting is best-effort: the merge-helper runs regardless,
-   * but we acquire a slot if one is available and release it after.
+   * The merge-helper consumes a concurrency slot like any other agent
+   * (§17.6, D7): before spawning it we wait for a `total` slot to free up,
+   * so the cap is never exceeded. If no slot becomes available within the
+   * bounded wait, the merge is aborted and reported as failed.
    *
    * Edge case — if `mergeFF` fails but there are no conflicting files (e.g.
    * branches have diverged without overlapping changes), we abort the merge
@@ -238,9 +256,29 @@ export function createMergeWorker(opts: MergeWorkerOptions): MergeWorker {
       return;
     }
 
-    // Acquire a pool slot (best-effort). The merge-helper runs even if the
-    // pool is full because conflict resolution is on the critical path.
-    const acquired = opts.pools.tryAcquire(undefined, undefined);
+    // The merge-helper consumes a concurrency slot like any other agent
+    // (§17.6, D7). Wait for one to free up before spawning so the `total`
+    // cap is never exceeded. Acquiring with (undefined, undefined) only
+    // touches the `total` pool, consistent with the rest of the codebase's
+    // current provider/model handling. The wait is bounded — a generous
+    // timeout (and an optional abort signal) ensures a permanently-full
+    // pool fails the merge rather than hanging the serial queue.
+    const slotAcquired = await acquireHelperSlot(opts.pools, opts.signal);
+    if (!slotAcquired) {
+      const reason = "merge-helper could not acquire a concurrency slot";
+      await opts.git.mergeAbort(opts.poolWorktree);
+      opts.audit("merge_failed", { taskId, reason });
+      try {
+        opts.onFailed(taskId, reason);
+      } catch (err) {
+        opts.audit("merge_callback_error", {
+          taskId,
+          phase: "onFailed",
+          reason: err instanceof Error ? err.message : String(err),
+        });
+      }
+      return;
+    }
 
     const demand: AgentDemand = {
       atomPath: `merge-${taskId}`,
@@ -259,9 +297,7 @@ export function createMergeWorker(opts: MergeWorkerOptions): MergeWorker {
       try {
         await opts.agentRunner.runAgent(demand, runOpts);
       } finally {
-        if (acquired) {
-          opts.pools.release(undefined, undefined);
-        }
+        opts.pools.release(undefined, undefined);
       }
 
       // Check whether conflicts were resolved.
@@ -311,4 +347,29 @@ function buildMergeHelperPrompt(task: TaskRuntime, conflictFiles: string[]): str
     "",
     "Resolve the merge conflicts, stage, and commit.",
   ].join("\n");
+}
+
+/**
+ * Acquire a merge-helper slot from the `total` pool, polling every
+ * {@link HELPER_ACQUIRE_POLL_MS} until one is available.
+ *
+ * Resolves `true` once a slot is acquired, or `false` if the
+ * {@link HELPER_ACQUIRE_TIMEOUT_MS} deadline elapses or `signal` (if
+ * provided) aborts first — in which case the caller should treat the merge
+ * as failed.
+ *
+ * Polls with `(undefined, undefined)` so only the `total` pool is touched,
+ * matching the codebase's current provider/model handling.
+ */
+async function acquireHelperSlot(pools: PoolCoordinator, signal?: AbortSignal): Promise<boolean> {
+  const deadline = Date.now() + HELPER_ACQUIRE_TIMEOUT_MS;
+  for (;;) {
+    if (pools.tryAcquire(undefined, undefined)) return true;
+    if (signal?.aborted) return false;
+    const remaining = deadline - Date.now();
+    if (remaining <= 0) return false;
+    await new Promise<void>((resolve) =>
+      setTimeout(resolve, Math.min(HELPER_ACQUIRE_POLL_MS, remaining)),
+    );
+  }
 }

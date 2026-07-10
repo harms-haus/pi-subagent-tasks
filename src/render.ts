@@ -58,12 +58,19 @@ function countAgentLeaves(node: CursorNode): AgentLeafCount {
     }
   }
 
-  for (const sub of [node.workCursor, node.reviewCursor, node.childCursor]) {
-    if (sub !== undefined) {
-      const r = countAgentLeaves(sub);
-      done += r.done;
-      total += r.total;
-    }
+  // For gateLoop nodes, count only the work sub-cursor — the review atom
+  // is an internal review step, not a user-visible work leaf (L2).
+  if (node.workCursor !== undefined) {
+    const r = countAgentLeaves(node.workCursor);
+    done += r.done;
+    total += r.total;
+  }
+
+  // childCursor (loop) is a work leaf.
+  if (node.childCursor !== undefined) {
+    const r = countAgentLeaves(node.childCursor);
+    done += r.done;
+    total += r.total;
   }
 
   return { done, total };

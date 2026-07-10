@@ -19,7 +19,6 @@ import {
   createTaskWorktree,
   removeTaskWorktree,
   ensureExcludeEntry,
-  fallbackWorktreeDir,
   isGitRepo,
   canUseWorktrees,
   verifyWorktrees,
@@ -309,14 +308,6 @@ describe("ensureExcludeEntry", () => {
   });
 });
 
-describe("fallbackWorktreeDir", () => {
-  it("returns the fallback path under .git/pi-task-pools", () => {
-    const result = fallbackWorktreeDir("/repo", "pool-1");
-
-    expect(result).toBe("/repo/.git/pi-task-pools/pool-1/worktrees");
-  });
-});
-
 describe("isGitRepo", () => {
   it("returns true when git rev-parse succeeds with code 0", async () => {
     const git = createMockGitOps();
@@ -386,10 +377,8 @@ describe("canUseWorktrees", () => {
 });
 
 describe("verifyWorktrees", () => {
-  it("returns empty array when all task worktree paths exist", async () => {
+  it("returns empty missing/stale when all task worktree paths exist and are fresh", async () => {
     const git = createMockGitOps();
-    // The default mock worktreeList returns [{ path: "/repo", ... }]
-    // We need to also include the task worktree paths
     git.worktreeList = vi.fn().mockResolvedValue([
       { path: "/repo", head: "aaa", branch: "refs/heads/main", branchName: "main" },
       {
@@ -399,6 +388,8 @@ describe("verifyWorktrees", () => {
         branchName: "pi-task-pool/slug/t-1",
       },
     ]);
+    // merge-base --is-ancestor exits 0 → pool HEAD IS ancestor → NOT stale.
+    git.gitExec = vi.fn().mockResolvedValue({ stdout: "", stderr: "", code: 0, killed: false });
 
     const pool = makePoolState({
       tasks: [
@@ -409,11 +400,7 @@ describe("verifyWorktrees", () => {
           profile: undefined,
           dependsOn: [],
           compose: { type: "agent" },
-          cursor: {
-            kind: "agent",
-            path: "",
-            state: "done",
-          },
+          cursor: { kind: "agent", path: "", state: "done" },
           status: "done",
           retryCount: 0,
           runningAgentCount: 0,
@@ -425,14 +412,13 @@ describe("verifyWorktrees", () => {
       ],
     });
 
-    const missing = await verifyWorktrees(git, pool, "/repo");
+    const result = await verifyWorktrees(git, pool, "/repo");
 
-    expect(missing).toEqual([]);
+    expect(result).toEqual({ missing: [], stale: [] });
   });
 
   it("returns task ids whose worktreePath is missing from the list", async () => {
     const git = createMockGitOps();
-    // Default worktreeList only has the main repo, not /wt/t-1 or /wt/t-2
     git.worktreeList = vi
       .fn()
       .mockResolvedValue([
@@ -448,11 +434,7 @@ describe("verifyWorktrees", () => {
           profile: undefined,
           dependsOn: [],
           compose: { type: "agent" },
-          cursor: {
-            kind: "agent",
-            path: "",
-            state: "done",
-          },
+          cursor: { kind: "agent", path: "", state: "done" },
           status: "done",
           retryCount: 0,
           runningAgentCount: 0,
@@ -468,11 +450,7 @@ describe("verifyWorktrees", () => {
           profile: undefined,
           dependsOn: [],
           compose: { type: "agent" },
-          cursor: {
-            kind: "agent",
-            path: "",
-            state: "done",
-          },
+          cursor: { kind: "agent", path: "", state: "done" },
           status: "done",
           retryCount: 0,
           runningAgentCount: 0,
@@ -484,9 +462,10 @@ describe("verifyWorktrees", () => {
       ],
     });
 
-    const missing = await verifyWorktrees(git, pool, "/repo");
+    const result = await verifyWorktrees(git, pool, "/repo");
 
-    expect(missing).toEqual(["t-1", "t-2"]);
+    expect(result.missing).toEqual(["t-1", "t-2"]);
+    expect(result.stale).toEqual([]);
   });
 
   it("skips tasks with null worktreePath", async () => {
@@ -506,11 +485,7 @@ describe("verifyWorktrees", () => {
           profile: undefined,
           dependsOn: [],
           compose: { type: "agent" },
-          cursor: {
-            kind: "agent",
-            path: "",
-            state: "done",
-          },
+          cursor: { kind: "agent", path: "", state: "done" },
           status: "done",
           retryCount: 0,
           runningAgentCount: 0,
@@ -526,11 +501,7 @@ describe("verifyWorktrees", () => {
           profile: undefined,
           dependsOn: [],
           compose: { type: "agent" },
-          cursor: {
-            kind: "agent",
-            path: "",
-            state: "done",
-          },
+          cursor: { kind: "agent", path: "", state: "done" },
           status: "done",
           retryCount: 0,
           runningAgentCount: 0,
@@ -542,10 +513,11 @@ describe("verifyWorktrees", () => {
       ],
     });
 
-    const missing = await verifyWorktrees(git, pool, "/repo");
+    const result = await verifyWorktrees(git, pool, "/repo");
 
     // t-1 has null worktreePath so it's skipped
-    expect(missing).toEqual(["t-2"]);
+    expect(result.missing).toEqual(["t-2"]);
+    expect(result.stale).toEqual([]);
   });
 
   it("calls worktreeList with the given cwd", async () => {
@@ -555,5 +527,190 @@ describe("verifyWorktrees", () => {
     await verifyWorktrees(git, pool, "/other-repo");
 
     expect(git.worktreeList).toHaveBeenCalledWith("/other-repo");
+  });
+
+  // ── Stale-base detection (M8) ───────────────────────────────────────────
+
+  it("detects a stale-base worktree when merge-base --is-ancestor exits non-zero", async () => {
+    const git = createMockGitOps();
+    git.worktreeList = vi.fn().mockResolvedValue([
+      { path: "/repo", head: "poolHEAD", branch: "refs/heads/main", branchName: "main" },
+      {
+        path: "/wt/t-1",
+        head: "taskHEAD",
+        branch: "refs/heads/pi-task-pool/slug/t-1",
+        branchName: "pi-task-pool/slug/t-1",
+      },
+    ]);
+    // merge-base --is-ancestor exits 1 → pool HEAD is NOT an ancestor → stale.
+    git.gitExec = vi.fn().mockResolvedValue({ stdout: "", stderr: "", code: 1, killed: false });
+    git.revParseHead = vi.fn().mockResolvedValue("poolHEAD");
+
+    const pool = makePoolState({
+      tasks: [
+        {
+          id: "t-1",
+          title: "Task 1",
+          prompt: "do stuff",
+          profile: undefined,
+          dependsOn: ["t-0"],
+          compose: { type: "agent" },
+          cursor: { kind: "agent", path: "", state: "pending" },
+          status: "ready",
+          retryCount: 0,
+          runningAgentCount: 0,
+          worktreePath: "/wt/t-1",
+          branch: "pi-task-pool/slug/t-1",
+          sessionFiles: [],
+          downstreamCount: 0,
+        },
+      ],
+    });
+
+    const result = await verifyWorktrees(git, pool, "/repo");
+
+    expect(result.missing).toEqual([]);
+    expect(result.stale).toEqual(["t-1"]);
+    // merge-base was called with pool HEAD then task HEAD.
+    expect(git.gitExec).toHaveBeenCalledWith(
+      ["merge-base", "--is-ancestor", "poolHEAD", "taskHEAD"],
+      "/repo",
+    );
+  });
+
+  it("does NOT flag a worktree as stale when pool HEAD is an ancestor (exit 0)", async () => {
+    const git = createMockGitOps();
+    git.worktreeList = vi.fn().mockResolvedValue([
+      { path: "/repo", head: "poolHEAD", branch: "refs/heads/main", branchName: "main" },
+      {
+        path: "/wt/t-1",
+        head: "taskHEAD",
+        branch: "refs/heads/pi-task-pool/slug/t-1",
+        branchName: "pi-task-pool/slug/t-1",
+      },
+    ]);
+    // merge-base --is-ancestor exits 0 → pool HEAD IS ancestor → fresh.
+    git.gitExec = vi.fn().mockResolvedValue({ stdout: "", stderr: "", code: 0, killed: false });
+    git.revParseHead = vi.fn().mockResolvedValue("poolHEAD");
+
+    const pool = makePoolState({
+      tasks: [
+        {
+          id: "t-1",
+          title: "Task 1",
+          prompt: "do stuff",
+          profile: undefined,
+          dependsOn: [],
+          compose: { type: "agent" },
+          cursor: { kind: "agent", path: "", state: "pending" },
+          status: "ready",
+          retryCount: 0,
+          runningAgentCount: 0,
+          worktreePath: "/wt/t-1",
+          branch: "pi-task-pool/slug/t-1",
+          sessionFiles: [],
+          downstreamCount: 0,
+        },
+      ],
+    });
+
+    const result = await verifyWorktrees(git, pool, "/repo");
+
+    expect(result.missing).toEqual([]);
+    expect(result.stale).toEqual([]);
+  });
+
+  it("surfaces both missing and stale ids simultaneously", async () => {
+    const git = createMockGitOps();
+    // t-missing is absent from the list; t-stale is present but stale.
+    git.worktreeList = vi.fn().mockResolvedValue([
+      { path: "/repo", head: "poolHEAD", branch: "refs/heads/main", branchName: "main" },
+      {
+        path: "/wt/t-stale",
+        head: "staleHEAD",
+        branch: "refs/heads/pi-task-pool/slug/t-stale",
+        branchName: "pi-task-pool/slug/t-stale",
+      },
+    ]);
+    git.gitExec = vi.fn().mockResolvedValue({ stdout: "", stderr: "", code: 1, killed: false });
+    git.revParseHead = vi.fn().mockResolvedValue("poolHEAD");
+
+    const pool = makePoolState({
+      tasks: [
+        {
+          id: "t-missing",
+          title: "Missing",
+          prompt: "x",
+          profile: undefined,
+          dependsOn: [],
+          compose: { type: "agent" },
+          cursor: { kind: "agent", path: "", state: "pending" },
+          status: "ready",
+          retryCount: 0,
+          runningAgentCount: 0,
+          worktreePath: "/wt/t-missing",
+          branch: "pi-task-pool/slug/t-missing",
+          sessionFiles: [],
+          downstreamCount: 0,
+        },
+        {
+          id: "t-stale",
+          title: "Stale",
+          prompt: "y",
+          profile: undefined,
+          dependsOn: ["t-missing"],
+          compose: { type: "agent" },
+          cursor: { kind: "agent", path: "", state: "pending" },
+          status: "ready",
+          retryCount: 0,
+          runningAgentCount: 0,
+          worktreePath: "/wt/t-stale",
+          branch: "pi-task-pool/slug/t-stale",
+          sessionFiles: [],
+          downstreamCount: 0,
+        },
+      ],
+    });
+
+    const result = await verifyWorktrees(git, pool, "/repo");
+
+    expect(result.missing).toEqual(["t-missing"]);
+    expect(result.stale).toEqual(["t-stale"]);
+  });
+
+  it("does not call revParseHead when there are no stale candidates", async () => {
+    const git = createMockGitOps();
+    // Only the main repo is listed — every task worktree is missing.
+    git.worktreeList = vi
+      .fn()
+      .mockResolvedValue([
+        { path: "/repo", head: "aaa", branch: "refs/heads/main", branchName: "main" },
+      ]);
+    git.revParseHead = vi.fn();
+
+    const pool = makePoolState({
+      tasks: [
+        {
+          id: "t-1",
+          title: "Task 1",
+          prompt: "x",
+          profile: undefined,
+          dependsOn: [],
+          compose: { type: "agent" },
+          cursor: { kind: "agent", path: "", state: "pending" },
+          status: "ready",
+          retryCount: 0,
+          runningAgentCount: 0,
+          worktreePath: "/wt/t-1",
+          branch: "pi-task-pool/slug/t-1",
+          sessionFiles: [],
+          downstreamCount: 0,
+        },
+      ],
+    });
+
+    await verifyWorktrees(git, pool, "/repo");
+
+    expect(git.revParseHead).not.toHaveBeenCalled();
   });
 });

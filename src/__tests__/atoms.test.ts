@@ -625,6 +625,143 @@ describe("nextWantedAgents", () => {
     expect(demands).toHaveLength(1);
     expect(demands[0]!.atomPath).toBe("0.0");
   });
+
+  // ── profileResolver (C3 fix: provider/model on demands) ───────────────────
+
+  it("demands have undefined provider/model when no resolver is given", () => {
+    const cursor = buildCursor({ type: "agent", profile: "coder" }, "0");
+    const t = task(cursor, { profile: "coder" });
+    const demands = nextWantedAgents(t);
+    expect(demands).toHaveLength(1);
+    expect(demands[0]!.provider).toBeUndefined();
+    expect(demands[0]!.model).toBeUndefined();
+  });
+
+  it("populates provider and model on a demand when a resolver is given", () => {
+    const cursor = buildCursor({ type: "agent", profile: "coder" }, "0");
+    const t = task(cursor, { profile: "coder" });
+    const resolver = (name: string): { provider?: string; model?: string } => {
+      if (name === "coder") return { provider: "anthropic", model: "claude-sonnet-4-5" };
+      return {};
+    };
+    const demands = nextWantedAgents(t, resolver);
+    expect(demands).toHaveLength(1);
+    expect(demands[0]!.provider).toBe("anthropic");
+    expect(demands[0]!.model).toBe("claude-sonnet-4-5");
+  });
+
+  it("resolver is called with the effective profile name (atom override > task)", () => {
+    const cursor = buildCursor({ type: "agent", profile: "reviewer" }, "0");
+    const t = task(cursor, { profile: "coder" });
+    const seen: string[] = [];
+    const resolver = (name: string): { provider?: string; model?: string } => {
+      seen.push(name);
+      if (name === "reviewer") return { provider: "openai", model: "gpt-4o" };
+      return {};
+    };
+    const demands = nextWantedAgents(t, resolver);
+    expect(demands).toHaveLength(1);
+    expect(seen).toEqual(["reviewer"]);
+    expect(demands[0]!.provider).toBe("openai");
+    expect(demands[0]!.model).toBe("gpt-4o");
+  });
+
+  it("parallel: each demand gets its own resolved provider/model independently", () => {
+    const cursor = buildCursor(
+      {
+        type: "parallel",
+        atoms: [
+          { type: "agent", profile: "a" },
+          { type: "agent", profile: "b" },
+          { type: "agent", profile: "c" },
+        ],
+      },
+      "0",
+    );
+    const t = task(cursor);
+    const profiles: Record<string, { provider?: string; model?: string }> = {
+      a: { provider: "anthropic", model: "claude-sonnet-4-5" },
+      b: { provider: "openai", model: "gpt-4o" },
+      c: { provider: "anthropic", model: "claude-haiku-3-5" },
+    };
+    const resolver = (name: string): { provider?: string; model?: string } => profiles[name] ?? {};
+    const demands = nextWantedAgents(t, resolver);
+    expect(demands).toHaveLength(3);
+    expect(demands[0]!.provider).toBe("anthropic");
+    expect(demands[0]!.model).toBe("claude-sonnet-4-5");
+    expect(demands[1]!.provider).toBe("openai");
+    expect(demands[1]!.model).toBe("gpt-4o");
+    expect(demands[2]!.provider).toBe("anthropic");
+    expect(demands[2]!.model).toBe("claude-haiku-3-5");
+  });
+
+  it("gateLoop work and review get distinct resolved provider/model", () => {
+    const cursor = buildCursor(
+      {
+        type: "gateLoop",
+        work: { type: "agent", profile: "coder" },
+        review: { type: "agent", profile: "reviewer" },
+      },
+      "0",
+    );
+    cursor.state = "running";
+    const t = task(cursor);
+    const profiles: Record<string, { provider?: string; model?: string }> = {
+      coder: { provider: "anthropic", model: "claude-sonnet-4-5" },
+      reviewer: { provider: "openai", model: "o3" },
+    };
+    const resolver = (name: string): { provider?: string; model?: string } => profiles[name] ?? {};
+
+    // Work phase
+    const workDemands = nextWantedAgents(t, resolver);
+    expect(workDemands).toHaveLength(1);
+    expect(workDemands[0]!.provider).toBe("anthropic");
+    expect(workDemands[0]!.model).toBe("claude-sonnet-4-5");
+
+    // Switch to review phase
+    cursor.gatePhase = "review";
+    cursor.workCursor!.state = "done";
+    cursor.workCursor!.lastText = "Done";
+    const reviewDemands = nextWantedAgents(t, resolver);
+    expect(reviewDemands).toHaveLength(1);
+    expect(reviewDemands[0]!.provider).toBe("openai");
+    expect(reviewDemands[0]!.model).toBe("o3");
+  });
+
+  it("resolver returning empty object leaves provider/model undefined", () => {
+    const cursor = buildCursor({ type: "agent", profile: "unknown" }, "0");
+    const t = task(cursor);
+    const resolver = (): { provider?: string; model?: string } => ({});
+    const demands = nextWantedAgents(t, resolver);
+    expect(demands).toHaveLength(1);
+    expect(demands[0]!.provider).toBeUndefined();
+    expect(demands[0]!.model).toBeUndefined();
+  });
+
+  it("sequential: second child demand gets resolved provider/model after first completes", () => {
+    const cursor = buildCursor(
+      {
+        type: "sequential",
+        atoms: [
+          { type: "agent", profile: "planner" },
+          { type: "agent", profile: "coder" },
+        ],
+      },
+      "0",
+    );
+    const t = task(cursor);
+    child(cursor, 0).state = "done";
+    cursor.childIndex = 1;
+    const resolver = (name: string): { provider?: string; model?: string } => {
+      if (name === "coder") return { provider: "anthropic", model: "claude-sonnet-4-5" };
+      return {};
+    };
+    const demands = nextWantedAgents(t, resolver);
+    expect(demands).toHaveLength(1);
+    expect(demands[0]!.profileName).toBe("coder");
+    expect(demands[0]!.provider).toBe("anthropic");
+    expect(demands[0]!.model).toBe("claude-sonnet-4-5");
+  });
 });
 
 // ── advanceComposeCursor ─────────────────────────────────────────────────────
@@ -1094,7 +1231,7 @@ describe("advanceComposeCursor", () => {
     );
     root.children![1]!.kind = "bogus" as never;
     const t = task(root);
-    expect(() => advanceComposeCursor(t, "0.0", okResult("A"))).toThrow("Unexpected compose kind");
+    expect(() => advanceComposeCursor(t, "0.0", okResult("A"))).toThrow("Unexpected value");
   });
 
   // ── gateLoop (via handler) ─────────────────────────────────────────────────
@@ -1577,7 +1714,7 @@ describe("advanceComposeCursor", () => {
     // Corrupt the kind to trigger assertNever in demandsFor
     (cursor as { kind: string }).kind = "unknown-kind";
     const t = task(cursor);
-    expect(() => nextWantedAgents(t)).toThrow("Unexpected compose kind");
+    expect(() => nextWantedAgents(t)).toThrow("Unexpected value");
   });
 
   it("assertNever in recomputeCompletion throws on unknown cursor kind", () => {

@@ -33,6 +33,7 @@ import type { GitOps } from "./git-op";
 import type {
   AgentRunner,
   ComposeAtom,
+  CursorNode,
   LimitsConfig,
   PoolState,
   PoolUsage,
@@ -66,7 +67,7 @@ import { resolveDeps, detectCycles, computeDownstreamCount } from "./dag";
 import { recomputeInitialStatuses, propagateFailures } from "./status";
 import { buildCursor } from "./cursor";
 import { slugify, poolDir } from "./utils";
-import { seedMergeHelperProfile } from "./profiles";
+import { seedMergeHelperProfile, resolveProfile } from "./profiles";
 import { DEFAULT_TOTAL_LIMIT, DEFAULT_MAX_RETRIES, BRANCH_PREFIX } from "./constants";
 
 // ── Compose schema (relaxed — Type.Any for recursive compose field) ─────────
@@ -141,6 +142,29 @@ export interface CreateRunTasksToolOptions {
   childProcesses: Set<ChildProcess>;
 }
 
+// ── Helper: detect completed atoms in a cursor tree ──────────────────────
+
+/**
+ * Recursively check whether a cursor tree contains ANY node whose state is
+ * `"done"` — i.e. the task has made meaningful progress that should not be
+ * destroyed by a worktree recreation.
+ *
+ * Mirrors the recursive-walk pattern in `retry.ts`'s `findAllRunningNodes`,
+ * traversing `children`, `workCursor`, `reviewCursor`, and `childCursor`.
+ */
+function hasCompletedAtoms(cursor: CursorNode): boolean {
+  if (cursor.state === "done") return true;
+  if (cursor.children) {
+    for (const child of cursor.children) {
+      if (hasCompletedAtoms(child)) return true;
+    }
+  }
+  for (const sub of [cursor.workCursor, cursor.reviewCursor, cursor.childCursor]) {
+    if (sub !== undefined && hasCompletedAtoms(sub)) return true;
+  }
+  return false;
+}
+
 // ── Helper: build a TaskRuntime from a spec + resolved metadata ────────────
 
 function specToTaskRuntime(
@@ -159,7 +183,7 @@ function specToTaskRuntime(
     dependsOn: deps,
     compose,
     cursor,
-    status: "blocked",
+    status: "ready", // overwritten by recomputeInitialStatuses; placeholder
     retryCount: 0,
     runningAgentCount: 0,
     worktreePath: null,
@@ -322,33 +346,82 @@ async function runPool(params: Record<string, unknown>, rpc: RunPoolContext) {
       }
       pool = restored;
 
+      // Create the audit logger early so lifecycle events during
+      // reconciliation and worktree recreation are captured (H3/M4).
+      audit = new AuditLogger(poolDirPath, pool.id);
+
       // Reconcile running/parked/failed → ready.
+      //
+      // M8: verifyWorktrees now returns { missing, stale }. We capture the
+      // stale ids via the callback closure (reconcilePoolOnResume →
+      // reconcileForResume forwards only the "missing" ids as its return
+      // value). This avoids touching the reconcile plumbing while still
+      // surfacing stale-base worktrees for targeted recreation below.
+      let staleWorktreeIds: string[] = [];
       const { missingWorktrees } = await reconcilePoolOnResume(pool, {
-        verifyWorktrees: async (p: PoolState) => verifyWorktrees(git, p, cwd),
+        verifyWorktrees: async (p: PoolState) => {
+          const v = await verifyWorktrees(git, p, cwd);
+          staleWorktreeIds = v.stale;
+          return v.missing;
+        },
       });
 
-      // Recreate missing task worktrees.
+      const slug = slugify(pool.name);
+
+      // Recreate missing task worktrees (externally deleted / corrupted).
       const poolHead = await git.revParseHead(pool.poolWorktree);
       for (const taskId of missingWorktrees) {
         const task = pool.tasks.find((t) => t.id === taskId);
         if (task !== undefined) {
-          const wt = await createTaskWorktree(
-            git,
-            cwd,
-            pool.id,
-            slugify(pool.name),
-            task.id,
-            poolHead,
-          );
+          const wt = await createTaskWorktree(git, cwd, pool.id, slug, task.id, poolHead);
           task.worktreePath = wt.path;
           task.branch = wt.branch;
+          audit.log("worktree_created", {
+            scope: "task",
+            taskId: task.id,
+            path: wt.path,
+            reason: "resume",
+          });
+        }
+      }
+
+      // M8: handle stale-base task worktrees — those branched from an old
+      // pool HEAD before their parents' code was merged in (D10 / §10.1).
+      for (const taskId of staleWorktreeIds) {
+        const task = pool.tasks.find((t) => t.id === taskId);
+        if (task === undefined) continue;
+        if (!hasCompletedAtoms(task.cursor)) {
+          // No progress to lose — recreate from the current pool HEAD so the
+          // task sees its parents' merged code. Mirrors onTaskRestart /
+          // onEnsureWorktree recreation.
+          if (task.worktreePath !== null && task.branch !== null) {
+            await removeTaskWorktree(git, task.worktreePath, task.branch, cwd);
+            audit.log("worktree_deleted", { taskId: task.id, reason: "stale-base" });
+          }
+          const wt = await createTaskWorktree(git, cwd, pool.id, slug, task.id, poolHead);
+          task.worktreePath = wt.path;
+          task.branch = wt.branch;
+          audit.log("worktree_created", {
+            scope: "task",
+            taskId: task.id,
+            path: wt.path,
+            reason: "stale-base",
+          });
+        } else {
+          // Has completed-atom progress — preserve the worktree to avoid
+          // losing work, but surface a warning so it's visible that the
+          // task may be missing its parents' merged code.
+          audit.log("worktree_stale", {
+            taskId: task.id,
+            path: task.worktreePath,
+            reason: "has-progress",
+          });
         }
       }
 
       writeState(poolDirPath, pool);
       appendPoolHint({ appendEntry: rpc.pi.appendEntry.bind(rpc.pi) }, pool.id);
 
-      audit = new AuditLogger(poolDirPath, pool.id);
       audit.poolResumed({ poolId: pool.id, tasks: pool.tasks.length });
     } else {
       // ── CREATE path ──────────────────────────────────────────────────────
@@ -449,6 +522,10 @@ async function runPool(params: Record<string, unknown>, rpc: RunPoolContext) {
       // Create pool directories.
       createPoolDirs(poolDirPath);
 
+      // Create the audit logger early so worktree creation events are
+      // captured (H3/M4).
+      audit = new AuditLogger(poolDirPath, pool.id);
+
       // BUGFIX §10.6: track created worktrees so we can clean up if any
       // subsequent creation fails, preventing orphan worktrees.
       const createdWts: Array<{ path: string; branch: string }> = [];
@@ -459,22 +536,17 @@ async function runPool(params: Record<string, unknown>, rpc: RunPoolContext) {
         pool.poolWorktree = poolWt.path;
         pool.branch = poolWt.branch;
         createdWts.push(poolWt);
+        audit.log("worktree_created", { scope: "pool", path: poolWt.path });
 
         // Ensure .pi/task-pools/ is excluded from tracking.
         await ensureExcludeEntry(git, cwd);
 
-        // Create task worktrees for ALL tasks (so scheduler can start them).
-        // NOTE (D10): this eagerly creates all task worktrees at pool creation
-        // time rather than lazily from post-merge pool HEAD.  Lazy-branching
-        // (§10.3) is a known spec deviation acceptable for v1 and will be
-        // validated in kb-26 (real integration).
-        const poolHead = await git.revParseHead(pool.poolWorktree);
-        for (const task of pool.tasks) {
-          const wt = await createTaskWorktree(git, cwd, pool.id, poolId, task.id, poolHead);
-          task.worktreePath = wt.path;
-          task.branch = wt.branch;
-          createdWts.push(wt);
-        }
+        // NOTE (H1 / D10 / §10.1): task worktrees are NOT created here.
+        // They are created lazily on first start (when the task becomes
+        // ready/parked with all deps done) via the scheduler's
+        // ensureWorktrees() hook + the onEnsureWorktree callback below.
+        // This ensures a dependent task branches from the pool HEAD that
+        // already includes its merged parents' code.
       } catch (err) {
         // Clean up any worktrees already created before the failure to avoid
         // orphaned branches and working trees.
@@ -500,8 +572,7 @@ async function runPool(params: Record<string, unknown>, rpc: RunPoolContext) {
       // Register pool hint for session browser.
       appendPoolHint({ appendEntry: rpc.pi.appendEntry.bind(rpc.pi) }, pool.id);
 
-      // Start audit.
-      audit = new AuditLogger(poolDirPath, pool.id);
+      // Emit pool_created (audit logger was created earlier, after createPoolDirs).
       audit.poolCreated({
         poolId: pool.id,
         name,
@@ -535,6 +606,7 @@ async function runPool(params: Record<string, unknown>, rpc: RunPoolContext) {
       sessionDir: join(poolDirPath, "sessions"),
       pools,
       poolId: pool.id,
+      cwd,
       getTask: (taskId: string) => pool.tasks.find((t) => t.id === taskId),
       onMerged: (taskId: string) => {
         const t = pool.tasks.find((task) => task.id === taskId);
@@ -544,7 +616,9 @@ async function runPool(params: Record<string, unknown>, rpc: RunPoolContext) {
           t.branch = null;
         }
         writeState(poolDirPath, pool);
-        (audit as AuditLogger).worktreeMerged({ taskId });
+        // H3: worktree_merged is already emitted by the merge worker.
+        // Emit task_done here where the status transition happens.
+        (audit as AuditLogger).log("task_done", { taskId });
         scheduler.mergeComplete(taskId);
       },
       onFailed: (taskId: string, reason: string) => {
@@ -565,6 +639,19 @@ async function runPool(params: Record<string, unknown>, rpc: RunPoolContext) {
       pool,
       pools,
       agentRunner,
+      sessionDir: join(poolDirPath, "sessions"),
+      // C3: resolve each atom's profile so provider/model concurrency limits
+      // (D7) are enforced, not just the `total` pool.
+      profileResolver: (profileName: string) => {
+        try {
+          const p = resolveProfile(profileName, cwd);
+          return { provider: p.provider, model: p.model };
+        } catch {
+          // Unknown profile → leave undefined; the agent start will fail with
+          // a clear error from resolveProfile at spawn time.
+          return {};
+        }
+      },
       maxRetries: pool.maxRetries,
       onMergeEnqueue: (taskId: string) => {
         mergeWorker.enqueue(taskId);
@@ -596,14 +683,37 @@ async function runPool(params: Record<string, unknown>, rpc: RunPoolContext) {
         // compose cursor so the task starts from scratch.
         if (task.worktreePath && task.branch) {
           await removeTaskWorktree(git, task.worktreePath, task.branch, cwd);
+          (audit as AuditLogger).log("worktree_deleted", { taskId: task.id, reason: "L2 restart" });
         }
         const poolHead = await git.revParseHead(pool.poolWorktree);
         const slug = slugify(pool.name);
         const wt = await createTaskWorktree(git, cwd, pool.id, slug, task.id, poolHead);
         task.worktreePath = wt.path;
         task.branch = wt.branch;
+        (audit as AuditLogger).log("worktree_created", {
+          scope: "task",
+          taskId: task.id,
+          path: wt.path,
+          reason: "L2 restart",
+        });
         task.cursor = buildCursor(task.compose, task.id);
         task.sessionFiles = [];
+      },
+      onEnsureWorktree: async (task: TaskRuntime) => {
+        // H1 / D10 / §10.1: lazily create a task worktree on first start,
+        // branched from the pool's CURRENT HEAD so dependent tasks see
+        // their merged parents' code.
+        const poolHead = await git.revParseHead(pool.poolWorktree);
+        const slug = slugify(pool.name);
+        const wt = await createTaskWorktree(git, cwd, pool.id, slug, task.id, poolHead);
+        task.worktreePath = wt.path;
+        task.branch = wt.branch;
+        (audit as AuditLogger).log("worktree_created", {
+          scope: "task",
+          taskId: task.id,
+          path: wt.path,
+        });
+        writeState(poolDirPath, pool);
       },
       onAudit,
       signal: rpc.signal,
@@ -620,9 +730,11 @@ async function runPool(params: Record<string, unknown>, rpc: RunPoolContext) {
     const intervalId = setInterval(() => {
       if (updateFn) {
         try {
-          const partial = renderSummary(pool);
+          // M7: during partial (in-progress) updates, renderResult only uses
+          // details.board — the full summary string is rebuilt and discarded
+          // every tick. Send a lightweight placeholder instead.
           updateFn({
-            content: partial.content,
+            content: [{ type: "text", text: "running…" }],
             details: {
               poolId: pool.id,
               board: pool,
@@ -641,7 +753,16 @@ async function runPool(params: Record<string, unknown>, rpc: RunPoolContext) {
 
     // ── Wait for fixed point ───────────────────────────────────────────────
     await new Promise<void>((resolve) => {
-      const check = (): void => {
+      const check = async (): Promise<void> => {
+        // H1 / D10 / §10.1: lazily create worktrees for ready/parked tasks
+        // whose dependencies are all done. ensureWorktrees() branches each
+        // from the pool's current HEAD and triggers globalSchedule() so the
+        // newly-worktree'd tasks can start.
+        try {
+          await scheduler.ensureWorktrees();
+        } catch {
+          // Best-effort — will retry on the next tick.
+        }
         if (rpc.signal?.aborted) {
           // BUGFIX §14.3: kill all child processes immediately so they do not
           // orphan; clear the set after to prevent double-kill on repeated
@@ -666,9 +787,11 @@ async function runPool(params: Record<string, unknown>, rpc: RunPoolContext) {
           resolve(undefined);
           return;
         }
-        setTimeout(check, 100);
+        setTimeout(() => {
+          void check();
+        }, 100);
       };
-      check();
+      void check();
     });
 
     // ── Completion ─────────────────────────────────────────────────────────

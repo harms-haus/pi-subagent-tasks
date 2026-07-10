@@ -18,7 +18,7 @@ import type {
 } from "../types";
 import type { PoolCoordinator } from "../pools";
 import type { MergeWorkerOptions } from "../merge";
-import { createMergeWorker } from "../merge";
+import { createMergeWorker, HELPER_ACQUIRE_POLL_MS, HELPER_ACQUIRE_TIMEOUT_MS } from "../merge";
 
 // ── Mock factory: GitOps ─────────────────────────────────────────────────────
 
@@ -191,6 +191,7 @@ function createBundle(): MockBundle {
     sessionDir: "/sessions",
     pools,
     poolId: "test-pool",
+    cwd: "/repo",
     getTask,
     onMerged,
     onFailed,
@@ -488,24 +489,85 @@ describe("merge conflict — FF failure", () => {
     expect(pools.release).toHaveBeenCalledWith(undefined, undefined);
   });
 
-  it("spawns merge-helper even when pool is full (best-effort slot)", async () => {
+  it("waits for a slot when the pool is full, then runs the helper once freed", async () => {
     const { opts, pools, agentRunner, getTask } = createBundle();
     const task = makeTask();
     getTask.mockReturnValue(task);
     opts.git.mergeFF = vi
       .fn()
       .mockResolvedValue({ stdout: "", stderr: "", code: 1, killed: false });
-    opts.git.conflictedFiles = vi.fn().mockResolvedValue(["src/file1.ts"]);
-    pools.tryAcquire = vi.fn().mockReturnValue(false); // Pool full
+    // First conflictedFiles call (guard) reports a conflict; the second
+    // (post-helper) reports none so the merge resolves cleanly.
+    opts.git.conflictedFiles = vi
+      .fn()
+      .mockResolvedValueOnce(["src/file1.ts"])
+      .mockResolvedValueOnce([]);
+
+    // Pool starts full; flips to available once a slot is released.
+    let slotFree = false;
+    pools.tryAcquire = vi.fn(() => slotFree);
+    pools.release = vi.fn(() => {
+      slotFree = true;
+    });
 
     const worker = createMergeWorker(opts);
     worker.enqueue("t-1");
-    await worker.processNext();
+    const processPromise = worker.processNext();
 
-    // Agent still ran
-    expect(agentRunner.received).toHaveLength(1);
-    // Release should NOT have been called since acquire returned false
-    expect(pools.release).not.toHaveBeenCalled();
+    // Flush the pre-acquire work (status/mergeFF/conflicts). The acquire
+    // loop has started, found no slot, and parked on its poll delay — the
+    // helper must NOT have run yet.
+    await vi.advanceTimersByTimeAsync(0);
+    expect(agentRunner.received).toHaveLength(0);
+
+    // Another agent finishes and frees a slot.
+    pools.release(undefined, undefined);
+
+    // Advance past one poll delay → the loop re-checks, acquires, spawns.
+    await vi.advanceTimersByTimeAsync(HELPER_ACQUIRE_POLL_MS);
+    await vi.waitFor(() => {
+      expect(agentRunner.received).toHaveLength(1);
+    });
+
+    await processPromise;
+
+    // Slot was acquired (eventually) and released after the helper ran.
+    expect(pools.release).toHaveBeenCalledWith(undefined, undefined);
+  });
+
+  it("treats a permanently-full pool as a merge failure once the wait bound elapses", async () => {
+    const { opts, pools, agentRunner, onFailed, audit, getTask } = createBundle();
+    const task = makeTask();
+    getTask.mockReturnValue(task);
+    opts.git.mergeFF = vi
+      .fn()
+      .mockResolvedValue({ stdout: "", stderr: "", code: 1, killed: false });
+    opts.git.conflictedFiles = vi.fn().mockResolvedValue(["src/file1.ts"]);
+
+    // Pool stays full forever.
+    pools.tryAcquire = vi.fn().mockReturnValue(false);
+
+    const worker = createMergeWorker(opts);
+    worker.enqueue("t-1");
+    const processPromise = worker.processNext();
+
+    // Advance past the entire wait bound — the loop gives up.
+    await vi.advanceTimersByTimeAsync(HELPER_ACQUIRE_TIMEOUT_MS + HELPER_ACQUIRE_POLL_MS);
+
+    await processPromise;
+
+    // Helper never ran.
+    expect(agentRunner.received).toHaveLength(0);
+    // Merge aborted and reported as failed.
+    expect(opts.git.mergeAbort).toHaveBeenCalledWith("/wt/pool");
+    expect(audit).toHaveBeenCalledWith("merge_failed", {
+      taskId: "t-1",
+      reason: "merge-helper could not acquire a concurrency slot",
+    });
+    expect(onFailed).toHaveBeenCalledWith(
+      "t-1",
+      "merge-helper could not acquire a concurrency slot",
+    );
   });
 
   it("helper resolves conflicts → merge_resolved → success path", async () => {

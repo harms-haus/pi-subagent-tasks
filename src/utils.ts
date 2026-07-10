@@ -25,14 +25,6 @@ export function slugify(str: string): string {
 }
 
 /**
- * Kebab-case a human label (alias of {@link slugify}). Used for titling where a
- * strict id slug and a display label coincide.
- */
-export function kebabCase(str: string): string {
-  return slugify(str);
-}
-
-/**
  * Generate a UTC timecode of the form `YYYYMMDDTHHMMSSZ` (e.g.
  * `20260709T151730Z`). Used for canonical session-file names (§11, §12).
  */
@@ -46,17 +38,6 @@ export function timecode(): string {
   const mi = pad(d.getUTCMinutes());
   const ss = pad(d.getUTCSeconds());
   return `${yyyy}${mm}${dd}T${hh}${mi}${ss}Z`;
-}
-
-/**
- * Truncate `str` to at most `max` characters, appending `ellipsis` (default
- * `"..."`) when truncation occurs. When `max` is too small to hold the
- * ellipsis, the ellipsis itself is sliced to fit.
- */
-export function truncate(str: string, max: number, ellipsis = "..."): string {
-  if (str.length <= max) return str;
-  if (max <= ellipsis.length) return ellipsis.slice(0, max);
-  return str.slice(0, max - ellipsis.length) + ellipsis;
 }
 
 // ── Durations ────────────────────────────────────────────────────────────────
@@ -116,5 +97,5 @@ export function poolDir(cwd: string, id: string): string {
  * the `state.json` boundary against corrupt or future-variant data.
  */
 export function assertNever(x: never): never {
-  throw new Error(`Unexpected compose kind: ${JSON.stringify(x)}`);
+  throw new Error(`Unexpected value: ${JSON.stringify(x)}`);
 }
