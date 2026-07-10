@@ -452,7 +452,7 @@ over `ready` ones so they get the next freed slot.
 │   └── 20260709T151730Z-tests.jsonl
 ├── worktrees/
 │   ├── pool/               # pool worktree (branch: pi-subagent-task/<slug>)
-│   ├── <taskId>/           # task worktree (branch: pi-subagent-task/<slug>/<taskId>)
+│   ├── <taskId>/           # task worktree (branch: pi-subagent-task/<slug>--<taskId>)
 │   └── ...
 └── artifacts/              # agents are told to write run artifacts here
 ```

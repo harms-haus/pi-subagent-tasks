@@ -49,7 +49,7 @@ export async function createPoolWorktree(
  * Create a task-specific worktree.
  *
  * Path: `<cwd>/.pi/subagent-tasks/<poolId>/worktrees/<taskId>`
- * Branch: `pi-subagent-task/<slug>/<taskId>`
+ * Branch: `pi-subagent-task/<slug>--<taskId>`
  *
  * Task worktrees are ephemeral: they exist only while the task is running
  * and are removed when the task reaches a terminal state (§10.4).
@@ -63,7 +63,11 @@ export async function createTaskWorktree(
   poolHead: string,
 ): Promise<{ path: string; branch: string }> {
   const path = join(poolDir(cwd, poolId), "worktrees", taskId);
-  const branch = `${BRANCH_PREFIX}/${slug}/${taskId}`;
+  // A pool branch already occupies `refs/heads/<prefix>/<slug>`. Git refs
+  // cannot simultaneously use that path as a directory for
+  // `<prefix>/<slug>/<taskId>`, so task branches must be siblings rather than
+  // children of the pool ref.
+  const branch = `${BRANCH_PREFIX}/${slug}--${taskId}`;
 
   await git.worktreeAdd({ path, branch, startPoint: poolHead, cwd });
 

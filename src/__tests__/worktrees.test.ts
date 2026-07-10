@@ -130,10 +130,10 @@ describe("createTaskWorktree", () => {
     );
 
     expect(result.path).toBe("/repo/.pi/subagent-tasks/pool-1/worktrees/t-1");
-    expect(result.branch).toBe("pi-subagent-task/my-pool/t-1");
+    expect(result.branch).toBe("pi-subagent-task/my-pool--t-1");
     expect(git.worktreeAdd).toHaveBeenCalledWith({
       path: "/repo/.pi/subagent-tasks/pool-1/worktrees/t-1",
-      branch: "pi-subagent-task/my-pool/t-1",
+      branch: "pi-subagent-task/my-pool--t-1",
       startPoint: "pool-head-sha",
       cwd: "/repo",
     });

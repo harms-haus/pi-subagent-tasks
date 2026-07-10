@@ -910,7 +910,7 @@ describe("compose scheduler integration", () => {
     expect(cursor.executionCount).toBe(SOFT_RETRY_CAP);
     expect(task.retryCount).toBe(1);
     expect(task.status).toBe("failed");
-    expect(task.lastError).toBeUndefined(); // task-fail doesn't set lastError in scheduler
+    expect(task.lastError).toBe("agent exited with code 1");
     expect(scheduler.isComplete()).toBe(true);
   });
 

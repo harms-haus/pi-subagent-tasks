@@ -403,6 +403,10 @@ export function createScheduler(opts: SchedulerOptions): Scheduler {
         return;
       }
     } else {
+      // Preserve the actionable failure across soft retries and task restarts
+      // so permanent failures never degrade to "unknown" in the summary.
+      task.lastError = result.error ?? `agent exited with code ${result.exitCode}`;
+
       // Agent failure — consult the error handler.
       const action = opts.callbacks.handleAgentError(task, atomPath, result);
 
@@ -618,10 +622,23 @@ export function createScheduler(opts: SchedulerOptions): Scheduler {
     if (toEnsure.length === 0) return;
 
     for (const task of toEnsure) {
-      await cb(task);
+      try {
+        await cb(task);
+      } catch (error) {
+        const message = error instanceof Error ? error.message : String(error);
+        task.status = "failed";
+        task.lastError = `Worktree creation failed: ${message}`;
+        opts.onAudit?.("task_failed", {
+          taskId: task.id,
+          reason: "worktree_creation_failed",
+          error: message,
+        });
+        opts.callbacks.onUpdate();
+      }
     }
 
-    // Re-run scheduling so the newly-worktree'd tasks can start.
+    // Re-run scheduling so successfully created worktrees can start and
+    // failures can participate in fixed-point detection.
     globalSchedule();
   }
 

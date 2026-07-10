@@ -191,7 +191,8 @@ export function createGitOps(pi: ExtensionAPI): GitOps {
       if (opts.startPoint) {
         args.push(opts.startPoint);
       }
-      return gitExec(args, opts.cwd);
+      // Never report a worktree as created when git rejected the branch/path.
+      return gitExec(args, opts.cwd).then(checkCode);
     });
   }
 

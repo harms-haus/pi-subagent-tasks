@@ -1235,6 +1235,7 @@ describe("scheduler core", () => {
 
     expect(handleAgentError).toHaveBeenCalled();
     expect(pool.tasks[0]!.status).toBe("failed");
+    expect(pool.tasks[0]!.lastError).toBe("something broke");
     expect(scheduler.isComplete()).toBe(true);
   });
 
@@ -1595,6 +1596,37 @@ describe("scheduler core", () => {
   });
 
   // ── Additional coverage: onAgentFinished edge cases ────────────────
+  it("marks a task failed when lazy worktree creation rejects", async () => {
+    const task = makeTask({ id: "t1", status: "ready", worktreePath: null });
+    const pool = createPool({ tasks: [task] });
+    const onAudit = vi.fn();
+    const scheduler = createScheduler({
+      pool,
+      pools: createPoolCoordinator(pool.limits),
+      sessionDir: SESSION_DIR,
+      agentRunner: createDeferredRunner([]).runner,
+      callbacks: {
+        ...stubCallbacks(),
+        getDemands: () => [],
+        onEnsureWorktree: vi.fn(async () => {
+          throw new Error("git exited 128: cannot lock ref");
+        }),
+      },
+      onAudit,
+    });
+
+    await scheduler.ensureWorktrees();
+
+    expect(task.status).toBe("failed");
+    expect(task.lastError).toBe("Worktree creation failed: git exited 128: cannot lock ref");
+    expect(onAudit).toHaveBeenCalledWith("task_failed", {
+      taskId: "t1",
+      reason: "worktree_creation_failed",
+      error: "git exited 128: cannot lock ref",
+    });
+    expect(scheduler.isComplete()).toBe(true);
+  });
+
   it("handles onAgentFinished with unknown taskId gracefully", () => {
     const pool = createPool({
       tasks: [makeTask({ id: "t1", status: "ready" })],

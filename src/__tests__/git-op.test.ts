@@ -359,6 +359,20 @@ describe("ref-mutating operations", () => {
     expect(exec).toHaveBeenCalledWith("git", ["worktree", "add", "-b", "feat-x", "/wt/feat"]);
   });
 
+  it("worktreeAdd rejects when git cannot create the branch or directory", async () => {
+    const { gitOps, exec } = createFixture();
+    exec.mockResolvedValue({
+      stdout: "",
+      stderr: "fatal: cannot lock ref",
+      code: 128,
+      killed: false,
+    });
+
+    await expect(gitOps.worktreeAdd({ path: "/wt/feat", branch: "feat-x" })).rejects.toThrow(
+      "git exited 128: fatal: cannot lock ref",
+    );
+  });
+
   it("worktreeAdd includes startPoint when provided", async () => {
     const { gitOps, exec } = createFixture();
 
