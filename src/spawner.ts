@@ -385,8 +385,25 @@ export function spawnAgent(opts: SpawnOptions): Promise<SpawnResult> {
     }
 
     // ── Stdin ─────────────────────────────────────────────────────────────
-    proc.stdin.write(opts.stdinPrompt);
-    proc.stdin.end();
+    try {
+      proc.stdin.write(opts.stdinPrompt);
+      proc.stdin.end();
+    } catch (err) {
+      // Custom, mocked, or already-destroyed streams can throw synchronously.
+      // Preserve the never-rejects contract and do not leave the child running.
+      const message = err instanceof Error ? err.message : String(err);
+      killProcessTree(proc.pid);
+      safeResolve({
+        exitCode: -1,
+        stderr: message,
+        lastAssistantText: "",
+        verdict: undefined,
+        loopDetected: false,
+        durationMs: Date.now() - start,
+        sessionId,
+      });
+      return;
+    }
 
     // ── Idle-timeout checker ──────────────────────────────────────────────
     idleInterval = setInterval(() => {

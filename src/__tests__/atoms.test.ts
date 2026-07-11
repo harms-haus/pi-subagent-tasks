@@ -1402,18 +1402,10 @@ describe("advanceComposeCursor", () => {
     expect(cursor.state).toBe("pending");
   });
 
-  it("loop with count=0 never starts", () => {
-    // A loop with count=0 is degenerate; buildCursor creates it with count=0.
-    const cursor = buildCursor({ type: "loop", atom: { type: "agent" }, count: 0 }, "L");
-    expect(cursor.count).toBe(0);
-    expect(cursor.loopIteration).toBe(1);
-    // Since loopIteration (1) > count (0), it's already "complete" in theory.
-    // But nextWantedAgents will check loopIteration > count... no, it checks
-    // node.state === "pending". So it would try to run iteration 1.
-    // This is fine — count=0 is a degenerate case we don't need to special-case.
-    const t = task(cursor);
-    const demands = nextWantedAgents(t);
-    expect(demands).toHaveLength(1);
+  it("invalid loop count is rejected before its child can produce an agent demand", () => {
+    expect(() => buildCursor({ type: "loop", atom: { type: "agent" }, count: 0 }, "L")).toThrow(
+      /Loop count must be an integer from 1 through 100/,
+    );
   });
 
   it("reports needsMerge=false when root not done", () => {

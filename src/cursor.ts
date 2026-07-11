@@ -88,8 +88,10 @@ export function buildCursor(compose: ComposeAtom | undefined, pathPrefix: string
     }
 
     case "loop":
-      if (compose.count > 100) {
-        throw new Error("Loop count must be <= 100; got: " + String(compose.count));
+      if (!Number.isInteger(compose.count) || compose.count < 1 || compose.count > 100) {
+        throw new Error(
+          "Loop count must be an integer from 1 through 100; got: " + String(compose.count),
+        );
       }
       return {
         kind: "loop",

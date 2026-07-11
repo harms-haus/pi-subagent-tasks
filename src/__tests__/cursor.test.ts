@@ -147,13 +147,41 @@ describe("buildCursor", () => {
     expect(node.childCursor!.title).toBe("step");
   });
 
-  it("throws when loop count exceeds 100", () => {
+  it.each([0, -1, 1.5, NaN, Infinity, 101])("rejects invalid loop count %s", (count) => {
     const atom: ComposeAtom = {
       type: "loop",
       atom: { type: "agent" },
-      count: 101,
+      count,
     };
-    expect(() => buildCursor(atom, "L")).toThrow(/Loop count must be <= 100/);
+    expect(() => buildCursor(atom, "L")).toThrow(
+      /Loop count must be an integer from 1 through 100/,
+    );
+  });
+
+  it.each([1, 100])("accepts boundary loop count %s", (count) => {
+    const node = buildCursor(
+      {
+        type: "loop",
+        atom: { type: "agent" },
+        count,
+      },
+      "L",
+    );
+    expect(node.count).toBe(count);
+    expect(node.loopIteration).toBe(1);
+    expect(node.childCursor?.state).toBe("pending");
+  });
+
+  it("validates loop count before building its child cursor", () => {
+    const atom = {
+      type: "loop",
+      count: 0,
+      atom: { type: "bogus" },
+    } as unknown as ComposeAtom;
+
+    expect(() => buildCursor(atom, "L")).toThrow(
+      /Loop count must be an integer from 1 through 100/,
+    );
   });
 
   it("builds a deeply nested tree with correct dotted paths", () => {

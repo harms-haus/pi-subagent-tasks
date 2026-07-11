@@ -1,8 +1,10 @@
 /** Tool for retrieving every agent response produced by one pool task. */
 
-import { readFile } from "node:fs/promises";
+import { readFile, realpath, stat } from "node:fs/promises";
+import { isAbsolute, join, relative, sep } from "node:path";
 import { defineTool, type ExtensionAPI } from "@earendil-works/pi-coding-agent";
 import { Type } from "typebox";
+import { SESSION_DIR_NAME } from "./constants";
 import { poolDir } from "./utils";
 import { readState } from "./state";
 
@@ -20,9 +22,29 @@ const taskHistoryParams = Type.Object(
   { additionalProperties: false },
 );
 
-async function readSessionData(path: string): Promise<unknown[] | { error: string }> {
+async function readSessionData(
+  path: string,
+  sessionsDir: string,
+): Promise<unknown[] | { error: string }> {
   try {
-    return (await readFile(path, "utf8"))
+    const [resolvedSessionsDir, resolvedPath] = await Promise.all([
+      realpath(sessionsDir),
+      realpath(path),
+    ]);
+    const pathFromSessionsDir = relative(resolvedSessionsDir, resolvedPath);
+    if (
+      pathFromSessionsDir === "" ||
+      pathFromSessionsDir === ".." ||
+      pathFromSessionsDir.startsWith(`..${sep}`) ||
+      isAbsolute(pathFromSessionsDir)
+    ) {
+      throw new Error("Session file is outside the pool sessions directory.");
+    }
+    if (!(await stat(resolvedPath)).isFile()) {
+      throw new Error("Session file is not a regular file.");
+    }
+
+    return (await readFile(resolvedPath, "utf8"))
       .split("\n")
       .filter((line) => line.trim() !== "")
       .map((line) => JSON.parse(line) as unknown);
@@ -50,7 +72,8 @@ export function createTaskHistoryTool(pi: ExtensionAPI): ReturnType<typeof defin
       ctx: unknown,
     ) {
       const cwd = (ctx as { cwd?: string } | undefined)?.cwd ?? process.cwd();
-      const state = readState(poolDir(cwd, params.poolId));
+      const requestedPoolDir = poolDir(cwd, params.poolId);
+      const state = readState(requestedPoolDir);
       if (!state) throw new Error(`Pool "${params.poolId}" not found.`);
 
       const task = state.tasks.find((candidate) => candidate.id === params.taskId);
@@ -86,7 +109,7 @@ export function createTaskHistoryTool(pi: ExtensionAPI): ReturnType<typeof defin
         result.sessions = await Promise.all(
           files.map(async (sessionFile) => ({
             sessionFile,
-            data: await readSessionData(sessionFile),
+            data: await readSessionData(sessionFile, join(requestedPoolDir, SESSION_DIR_NAME)),
           })),
         );
       }

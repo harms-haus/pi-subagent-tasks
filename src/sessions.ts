@@ -107,13 +107,24 @@ export function renameSession(srcPath: string, sessionDir: string, name: string)
     const target = join(sessionDir, `${stem}${suffix === 1 ? "" : `-${suffix}`}.jsonl`);
     try {
       linkSync(srcPath, target);
-      unlinkSync(srcPath);
-      return target;
     } catch (error) {
-      if ((error as NodeJS.ErrnoException).code !== "EEXIST") {
-        throw error;
+      if ((error as NodeJS.ErrnoException).code === "EEXIST") {
+        continue;
       }
+      throw error;
     }
+
+    try {
+      unlinkSync(srcPath);
+    } catch (error) {
+      try {
+        unlinkSync(target);
+      } catch {
+        // Preserve the source-removal failure that triggered compensation.
+      }
+      throw error;
+    }
+    return target;
   }
 }
 

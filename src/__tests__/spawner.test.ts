@@ -485,6 +485,62 @@ describe("spawnAgent", () => {
     expect(result.loopDetected).toBe(false);
   });
 
+  it("resolves once and terminates the child when stdin.write throws synchronously", async () => {
+    const onSettled = vi.fn();
+    const promise = spawnAgent({
+      ...defaultOpts,
+      onSpawn(proc) {
+        proc.stdin!.write = vi.fn(() => {
+          throw new Error("stdin write exploded");
+        });
+      },
+    });
+    void promise.then(onSettled, () => undefined);
+
+    await expect(promise).resolves.toMatchObject({
+      exitCode: -1,
+      stderr: expect.stringContaining("stdin write exploded"),
+      lastAssistantText: "",
+      loopDetected: false,
+    });
+    emitClose(0);
+    await Promise.resolve();
+
+    expect(mockKill).toHaveBeenCalledTimes(1);
+    expect(mockKill).toHaveBeenCalledWith(12_345, "SIGTERM");
+    expect(onSettled).toHaveBeenCalledTimes(1);
+  });
+
+  it("resolves once and terminates the child when stdin.end throws synchronously", async () => {
+    const onSettled = vi.fn();
+    const promise = spawnAgent({
+      ...defaultOpts,
+      onSpawn(proc) {
+        proc.stdin!.end = vi.fn(() => {
+          throw new Error("stdin end exploded");
+        });
+      },
+    });
+    void promise.then(onSettled, () => undefined);
+
+    await expect(promise).resolves.toMatchObject({
+      exitCode: -1,
+      stderr: expect.stringContaining("stdin end exploded"),
+      lastAssistantText: "",
+      loopDetected: false,
+    });
+    emitClose(0);
+    await Promise.resolve();
+
+    const proc = getMockProc() as {
+      stdin: { write: ReturnType<typeof vi.fn> };
+    };
+    expect(proc.stdin.write).toHaveBeenCalledWith(defaultOpts.stdinPrompt);
+    expect(mockKill).toHaveBeenCalledTimes(1);
+    expect(mockKill).toHaveBeenCalledWith(12_345, "SIGTERM");
+    expect(onSettled).toHaveBeenCalledTimes(1);
+  });
+
   // ── (f) UTF-8 multi-byte split across chunks ──────────────────────────
 
   it("reassembles multi-byte UTF-8 split across data chunks", async () => {

@@ -484,19 +484,32 @@ async function runPool(params: Record<string, unknown>, rpc: RunPoolContext) {
       }
 
       // Validate limits.
-      if (limits !== undefined && limits.total !== undefined) {
-        if (limits.total <= 0) {
-          throw new Error("'limits.total' must be > 0 when provided.");
+      if (limits !== undefined) {
+        if (limits.total !== undefined) {
+          if (!Number.isInteger(limits.total) || limits.total <= 0) {
+            throw new Error("'limits.total' must be a positive finite integer when provided.");
+          }
+          if (limits.total > 32) {
+            throw new Error("'limits.total' must be <= 32.");
+          }
         }
-        if (limits.total > 32) {
-          throw new Error("'limits.total' must be <= 32.");
+
+        for (const [provider, cap] of Object.entries(limits.provider ?? {})) {
+          if (!Number.isInteger(cap) || cap <= 0) {
+            throw new Error(`'limits.provider.${provider}' must be a positive finite integer.`);
+          }
+        }
+        for (const [model, cap] of Object.entries(limits.model ?? {})) {
+          if (!Number.isInteger(cap) || cap <= 0) {
+            throw new Error(`'limits.model.${model}' must be a positive finite integer.`);
+          }
         }
       }
 
       // Validate maxRetries.
       if (maxRetries !== undefined) {
-        if (maxRetries > 10) {
-          throw new Error("'maxRetries' must be <= 10.");
+        if (!Number.isInteger(maxRetries) || maxRetries < 0 || maxRetries > 10) {
+          throw new Error("'maxRetries' must be a finite integer between 0 and 10.");
         }
       }
 

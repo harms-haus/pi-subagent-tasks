@@ -5,6 +5,10 @@ const linkRace = vi.hoisted(() => ({
     ((source: string, target: string, performLink: () => void) => void) | undefined,
 }));
 
+const unlinkFailure = vi.hoisted(() => ({
+  intercept: undefined as ((path: string, performUnlink: () => void) => void) | undefined,
+}));
+
 vi.mock("node:fs", async (importOriginal) => {
   const actual = await importOriginal<typeof import("node:fs")>();
   return {
@@ -17,6 +21,15 @@ vi.mock("node:fs", async (importOriginal) => {
         return;
       }
       actual.linkSync(source, target);
+    },
+    unlinkSync(path: string): void {
+      if (unlinkFailure.intercept !== undefined) {
+        unlinkFailure.intercept(path, () => {
+          actual.unlinkSync(path);
+        });
+        return;
+      }
+      actual.unlinkSync(path);
     },
   };
 });
@@ -48,6 +61,7 @@ const tmpDirs = new Set<string>();
 afterEach(() => {
   vi.useRealTimers();
   linkRace.intercept = undefined;
+  unlinkFailure.intercept = undefined;
   for (const dir of tmpDirs) {
     rmSync(dir, { recursive: true, force: true });
   }
@@ -363,6 +377,44 @@ describe("renameSession", () => {
     expect(readFileSync(canonical, "utf-8")).toBe("worker-b");
     expect(readFileSync(result, "utf-8")).toBe("worker-a");
     expect(existsSync(source)).toBe(false);
+  });
+
+  it("rolls back its target and preserves the source when source removal fails", () => {
+    vi.useFakeTimers();
+    vi.setSystemTime(new Date("2026-07-09T15:17:30.000Z"));
+    const dir = makeTempDir();
+    const source = touch(join(dir, "raw.jsonl"), "agent output");
+    const target = join(dir, "20260709T151730Z-my-task.jsonl");
+    const sourceUnlinkError = Object.assign(new Error("source unlink failed"), { code: "EACCES" });
+
+    unlinkFailure.intercept = (path, performUnlink) => {
+      if (path === source) throw sourceUnlinkError;
+      performUnlink();
+    };
+
+    expect(() => renameSession(source, dir, "My Task")).toThrow(sourceUnlinkError);
+    expect(readFileSync(source, "utf-8")).toBe("agent output");
+    expect(existsSync(target)).toBe(false);
+  });
+
+  it("does not remove a pre-existing collision while rolling back a later target", () => {
+    vi.useFakeTimers();
+    vi.setSystemTime(new Date("2026-07-09T15:17:30.000Z"));
+    const dir = makeTempDir();
+    const source = touch(join(dir, "raw.jsonl"), "new agent");
+    const collision = touch(join(dir, "20260709T151730Z-my-task.jsonl"), "existing agent");
+    const reservedTarget = join(dir, "20260709T151730Z-my-task-2.jsonl");
+    const sourceUnlinkError = Object.assign(new Error("source unlink failed"), { code: "EPERM" });
+
+    unlinkFailure.intercept = (path, performUnlink) => {
+      if (path === source) throw sourceUnlinkError;
+      performUnlink();
+    };
+
+    expect(() => renameSession(source, dir, "My Task")).toThrow(sourceUnlinkError);
+    expect(readFileSync(collision, "utf-8")).toBe("existing agent");
+    expect(readFileSync(source, "utf-8")).toBe("new agent");
+    expect(existsSync(reservedTarget)).toBe(false);
   });
 
   it("preserves every session with deterministic repeated suffixes on label/time collision", () => {

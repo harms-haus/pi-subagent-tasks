@@ -243,8 +243,10 @@ You are a thorough code reviewer. Review the changes in the worktree and call
 `gate_verdict` with your final decision.
 ```
 
-A task or atom referencing a missing profile is a hard error. Use the
-`list_profiles` tool to discover existing profiles before referencing them.
+Before referencing a profile, inspect `~/.pi/agent/profiles/` and
+`.pi/profiles/` with filesystem tools such as `ls`. A project profile overrides
+a same-name global profile. A task or atom referencing a missing profile is a
+hard error.
 
 ## Development
 

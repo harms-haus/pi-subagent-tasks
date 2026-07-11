@@ -705,47 +705,109 @@ describe("run_tasks tool", () => {
     ).rejects.toThrow(/non-empty array/i);
   });
 
-  // ── Test 12: limits validation ───────────────────────────────────────
-  it("throws when limits.total is <= 0", async () => {
-    const ctx = createMockContext();
+  // ── Test 12: numeric option validation ───────────────────────────────
+  describe.each([
+    ["negative", -1],
+    ["fractional", 1.5],
+    ["NaN", Number.NaN],
+    ["Infinity", Number.POSITIVE_INFINITY],
+  ])("maxRetries %s", (_description, value) => {
+    it("rejects the value before creating or persisting a pool", async () => {
+      await expect(
+        tool.execute(
+          "call-12-retries",
+          { name: "Bad Retries", tasks: [{ prompt: "A" }], maxRetries: value },
+          undefined,
+          undefined,
+          createMockContext(),
+        ),
+      ).rejects.toThrow(/maxRetries/i);
 
-    await expect(
-      tool.execute(
-        "call-12a",
-        { name: "Bad Limits", tasks: [{ prompt: "A" }], limits: { total: 0 } },
-        undefined,
-        undefined,
-        ctx,
-      ),
-    ).rejects.toThrow(/'limits.total' must be > 0/i);
+      expect(worktreesModule.createPoolWorktree).not.toHaveBeenCalled();
+      expect(stateModule.createPoolDirs).not.toHaveBeenCalled();
+      expect(stateModule.writeState).not.toHaveBeenCalled();
+      expect(schedulerModule.createComposeScheduler).not.toHaveBeenCalled();
+    });
   });
 
-  it("throws when limits.total is > 32", async () => {
-    const ctx = createMockContext();
-
+  it("rejects maxRetries above 10 before creating or persisting a pool", async () => {
     await expect(
       tool.execute(
-        "call-12b",
-        { name: "Bad Limits", tasks: [{ prompt: "A" }], limits: { total: 33 } },
-        undefined,
-        undefined,
-        ctx,
-      ),
-    ).rejects.toThrow(/limits.total.*<= 32/i);
-  });
-
-  it("throws when maxRetries is > 10", async () => {
-    const ctx = createMockContext();
-
-    await expect(
-      tool.execute(
-        "call-12c",
+        "call-12-retries-high",
         { name: "Bad Retries", tasks: [{ prompt: "A" }], maxRetries: 11 },
         undefined,
         undefined,
-        ctx,
+        createMockContext(),
       ),
-    ).rejects.toThrow(/maxRetries.*<= 10/i);
+    ).rejects.toThrow(/maxRetries/i);
+
+    expect(worktreesModule.createPoolWorktree).not.toHaveBeenCalled();
+    expect(stateModule.createPoolDirs).not.toHaveBeenCalled();
+    expect(stateModule.writeState).not.toHaveBeenCalled();
+    expect(schedulerModule.createComposeScheduler).not.toHaveBeenCalled();
+  });
+
+  describe.each([
+    ["limits.total", { total: 0 }],
+    ["limits.total", { total: -1 }],
+    ["limits.total", { total: 1.5 }],
+    ["limits.total", { total: Number.NaN }],
+    ["limits.total", { total: Number.POSITIVE_INFINITY }],
+    ["limits.total", { total: 33 }],
+    ["limits.provider.anthropic", { provider: { anthropic: 0 } }],
+    ["limits.provider.anthropic", { provider: { anthropic: -1 } }],
+    ["limits.provider.anthropic", { provider: { anthropic: 1.5 } }],
+    ["limits.provider.anthropic", { provider: { anthropic: Number.NaN } }],
+    ["limits.provider.anthropic", { provider: { anthropic: Number.POSITIVE_INFINITY } }],
+    ["limits.model.anthropic/claude", { model: { "anthropic/claude": 0 } }],
+    ["limits.model.anthropic/claude", { model: { "anthropic/claude": -1 } }],
+    ["limits.model.anthropic/claude", { model: { "anthropic/claude": 1.5 } }],
+    ["limits.model.anthropic/claude", { model: { "anthropic/claude": Number.NaN } }],
+    ["limits.model.anthropic/claude", { model: { "anthropic/claude": Number.POSITIVE_INFINITY } }],
+  ])("%s validation", (field, limits) => {
+    it("rejects the invalid cap before creating or persisting a pool", async () => {
+      await expect(
+        tool.execute(
+          "call-12-limit",
+          { name: "Bad Limits", tasks: [{ prompt: "A" }], limits },
+          undefined,
+          undefined,
+          createMockContext(),
+        ),
+      ).rejects.toThrow(field);
+
+      expect(worktreesModule.createPoolWorktree).not.toHaveBeenCalled();
+      expect(stateModule.createPoolDirs).not.toHaveBeenCalled();
+      expect(stateModule.writeState).not.toHaveBeenCalled();
+      expect(schedulerModule.createComposeScheduler).not.toHaveBeenCalled();
+    });
+  });
+
+  it.each([
+    ["minimums", 1, 0, 1],
+    ["maximum bounded values", 32, 10, 1000],
+  ])("accepts valid numeric boundaries (%s)", async (_description, total, maxRetries, cap) => {
+    const result = await tool.execute(
+      `call-12-valid-${total}`,
+      {
+        name: `Valid Boundaries ${total}`,
+        tasks: [{ prompt: "A" }],
+        maxRetries,
+        limits: {
+          total,
+          provider: { anthropic: cap },
+          model: { "anthropic/claude": cap },
+        },
+      },
+      undefined,
+      undefined,
+      createMockContext(),
+    );
+
+    expect(result.content).toHaveLength(1);
+    const writes = vi.mocked(stateModule.writeState).mock.calls;
+    const createdPool = writes[0]?.[1];
+    expect(createdPool?.maxRetries).toBe(maxRetries);
   });
 
   // ── Test 13: Git worktrees not supported ─────────────────────────────

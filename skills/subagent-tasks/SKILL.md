@@ -62,8 +62,9 @@ Project overrides take precedence over global profiles of the same name.
 
 ### Discovering and creating profiles
 
-Use the **`list_profiles` tool** to see what profiles already exist before
-creating new ones. A task or atom that references a missing profile is a
+Inspect `~/.pi/agent/profiles/` and `.pi/profiles/` with filesystem tools such
+as `ls` before creating or referencing profiles. A project profile overrides a
+same-name global profile. A task or atom that references a missing profile is a
 **hard error** — `run_tasks` fails immediately with a clear message listing
 available profiles.
 
