@@ -1996,6 +1996,232 @@ describe("scheduler core", () => {
     expect(receivedOpts[0]!.sessionDir).toBe(SESSION_DIR_C2);
   });
 
+  it("reports capacity blocking while keeping acquired demand accounting exact", async () => {
+    const task = makeTask({ id: "t1", status: "ready" });
+    const pool = createPool({
+      limits: { total: 1, provider: {}, model: {} },
+      tasks: [task],
+    });
+    let finish!: (result: AgentRunResult) => void;
+    const runAgent = vi.fn(
+      () =>
+        new Promise<AgentRunResult>((resolve) => {
+          finish = resolve;
+        }),
+    );
+    const onAudit = vi.fn();
+    const scheduler = createScheduler({
+      pool,
+      pools: createPoolCoordinator(pool.limits),
+      agentRunner: { runAgent },
+      sessionDir: SESSION_DIR,
+      onAudit,
+      callbacks: stubCallbacks({
+        getDemands: () => [
+          {
+            atomPath: "first",
+            profileName: "p1",
+            effectivePrompt: "first",
+            cwd: "",
+            taskId: "t1",
+          },
+          {
+            atomPath: "second",
+            profileName: "p2",
+            effectivePrompt: "second",
+            cwd: "",
+            taskId: "t1",
+          },
+        ],
+        advanceCursor: () => ({ composeComplete: true, needsMerge: false }),
+      }),
+    });
+
+    scheduler.globalSchedule();
+    scheduler.globalSchedule();
+
+    expect(runAgent).toHaveBeenCalledTimes(1);
+    expect(task.runningAgentCount).toBe(1);
+    expect(onAudit).toHaveBeenCalledWith(
+      "agent_start",
+      expect.objectContaining({ atomPath: "first" }),
+    );
+    expect(onAudit).toHaveBeenCalledWith(
+      "limit_blocked",
+      expect.objectContaining({ atomPath: "second" }),
+    );
+
+    finish({ success: true, lastText: "done", exitCode: 0, durationMs: 0 });
+    await flushMicrotasks();
+    expect(task.runningAgentCount).toBe(0);
+  });
+
+  it("filters and bounds streamed output and ignores output after task removal", async () => {
+    const task = makeTask({ id: "t1", status: "ready" });
+    const pool = createPool({ tasks: [task] });
+    let options!: AgentRunOptions;
+    let finish!: (result: AgentRunResult) => void;
+    const onUpdate = vi.fn();
+    const scheduler = createScheduler({
+      pool,
+      pools: createPoolCoordinator(pool.limits),
+      sessionDir: SESSION_DIR,
+      agentRunner: {
+        runAgent: vi.fn((_demand, runOptions) => {
+          options = runOptions;
+          return new Promise<AgentRunResult>((resolve) => {
+            finish = resolve;
+          });
+        }),
+      },
+      callbacks: stubCallbacks({ onUpdate }),
+    });
+
+    scheduler.globalSchedule();
+    options.onOutput!("  \n\r\n");
+    options.onOutput!(Array.from({ length: 12 }, (_, index) => `line-${index}`).join("\n"));
+
+    expect(task.outputLines).toEqual(Array.from({ length: 10 }, (_, index) => `line-${index + 2}`));
+    expect(task.toolCallCount).toBe(12);
+    expect(onUpdate).toHaveBeenCalledTimes(1);
+
+    pool.tasks.splice(0, 1);
+    options.onOutput!("ignored");
+    expect(onUpdate).toHaveBeenCalledTimes(1);
+    finish({ success: true, lastText: "late", exitCode: 0, durationMs: 0 });
+    await flushMicrotasks();
+  });
+
+  it("uses fallback failure text and records failure history and audit data", async () => {
+    const task = makeTask({ id: "t1", status: "ready" });
+    const pool = createPool({ tasks: [task] });
+    const onAudit = vi.fn();
+    const scheduler = createScheduler({
+      pool,
+      pools: createPoolCoordinator(pool.limits),
+      sessionDir: SESSION_DIR,
+      agentRunner: {
+        async runAgent() {
+          return { success: false, lastText: "bad", exitCode: 23, durationMs: 1 };
+        },
+      },
+      callbacks: stubCallbacks({ handleAgentError: () => "task-fail" }),
+      onAudit,
+    });
+
+    scheduler.globalSchedule();
+    await flushMicrotasks();
+
+    expect(task).toMatchObject({ status: "failed", lastError: "agent exited with code 23" });
+    expect(task.responseHistory).toHaveLength(1);
+    expect(task.responseHistory![0]).toMatchObject({ atomPath: "0", success: false });
+    expect(onAudit).toHaveBeenCalledWith(
+      "agent_error",
+      expect.objectContaining({ taskId: "t1", exitCode: 23 }),
+    );
+    expect(scheduler.isComplete()).toBe(true);
+  });
+
+  it("fails a restart deterministically when worktree recreation throws a non-Error", async () => {
+    const task = makeTask({
+      id: "t1",
+      status: "ready",
+      startedAt: 10,
+    });
+    task.outputLines = ["old"];
+    task.toolCallCount = 7;
+    const pool = createPool({ tasks: [task] });
+    const onUpdate = vi.fn();
+    const scheduler = createScheduler({
+      pool,
+      pools: createPoolCoordinator(pool.limits),
+      sessionDir: SESSION_DIR,
+      agentRunner: {
+        async runAgent() {
+          return { success: false, lastText: "bad", exitCode: 1, durationMs: 0, error: "retry" };
+        },
+      },
+      callbacks: stubCallbacks({
+        handleAgentError: () => "task-restart",
+        onTaskRestart: vi.fn(() => {
+          // Exercise the scheduler's defensive handling of non-Error callback rejections.
+          // eslint-disable-next-line @typescript-eslint/only-throw-error
+          throw "checkout failed";
+        }),
+        onUpdate,
+      }),
+    });
+
+    scheduler.globalSchedule();
+    await flushMicrotasks();
+
+    expect(task).toMatchObject({
+      status: "failed",
+      retryCount: 1,
+      outputLines: [],
+      toolCallCount: 0,
+      lastError: "Worktree recreation failed after retry: checkout failed",
+    });
+    expect(task.startedAt).toBeUndefined();
+    expect(onUpdate).toHaveBeenCalled();
+    expect(scheduler.isComplete()).toBe(true);
+  });
+
+  it("handles pre-abort cleanup and inert worktree and merge notifications", async () => {
+    const task = makeTask({ id: "t1", status: "ready", worktreePath: null });
+    const pool = createPool({ tasks: [task] });
+    pool.mergeQueue.push("queued");
+    const controller = new AbortController();
+    controller.abort();
+    const onEnsureWorktree = vi.fn();
+    const onUpdate = vi.fn();
+    const scheduler = createScheduler({
+      pool,
+      pools: createPoolCoordinator(pool.limits),
+      sessionDir: SESSION_DIR,
+      agentRunner: createDeferredRunner([]).runner,
+      signal: controller.signal,
+      callbacks: stubCallbacks({ onEnsureWorktree, onUpdate }),
+    });
+
+    expect(pool.mergeQueue).toEqual([]);
+    await scheduler.ensureWorktrees();
+    scheduler.mergeComplete("missing");
+
+    expect(onEnsureWorktree).not.toHaveBeenCalled();
+    expect(onUpdate).not.toHaveBeenCalled();
+    expect(task.status).toBe("ready");
+    expect(scheduler.isComplete()).toBe(true);
+  });
+
+  it("does not create worktrees for ineligible tasks or when the callback is absent", async () => {
+    const done = makeTask({ id: "done", status: "done", worktreePath: null });
+    const existing = makeTask({ id: "existing", status: "ready", worktreePath: "/tmp/existing" });
+    const blocked = makeTask({ id: "blocked", status: "blocked", worktreePath: null });
+    const pool = createPool({ tasks: [done, existing, blocked] });
+    const onEnsureWorktree = vi.fn();
+    const scheduler = createScheduler({
+      pool,
+      pools: createPoolCoordinator(pool.limits),
+      sessionDir: SESSION_DIR,
+      agentRunner: createDeferredRunner([]).runner,
+      callbacks: stubCallbacks({ onEnsureWorktree }),
+    });
+
+    await scheduler.ensureWorktrees();
+    expect(onEnsureWorktree).not.toHaveBeenCalled();
+
+    const withoutCallback = createScheduler({
+      pool,
+      pools: createPoolCoordinator(pool.limits),
+      sessionDir: SESSION_DIR,
+      agentRunner: createDeferredRunner([]).runner,
+      callbacks: stubCallbacks(),
+    });
+    await withoutCallback.ensureWorktrees();
+    expect(pool.tasks).toEqual([done, existing, blocked]);
+  });
+
   // ── M1: session file recording ─────────────────────────────────────
   it("records the produced session file on task.sessionFiles after a successful run", async () => {
     // Regression guard for finding M1: when an agent finishes successfully

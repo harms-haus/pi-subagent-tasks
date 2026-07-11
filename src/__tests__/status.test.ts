@@ -83,6 +83,10 @@ describe("canTransition", () => {
     expect(canTransition("failed", "ready")).toBe(true);
   });
 
+  it("rejects an unknown source status defensively", () => {
+    expect(canTransition("unknown" as TaskRuntime["status"], "ready")).toBe(false);
+  });
+
   it("rejects ready → parked (parking invariant)", () => {
     expect(canTransition("ready", "parked")).toBe(false);
   });
@@ -359,6 +363,22 @@ describe("propagateFailures", () => {
     // Second call should return empty (already failed)
     const second = propagateFailures(tasks);
     expect(second).toEqual([]);
+  });
+
+  it("ignores dependencies on task ids absent from the graph", () => {
+    const tasks = [makeTask({ id: "b", dependsOn: ["ghost"], status: "blocked" })];
+    expect(propagateFailures(tasks)).toEqual([]);
+    expect(tasks[0]!.status).toBe("blocked");
+  });
+
+  it("propagates from an explicitly failed entry even when ids are duplicated", () => {
+    const tasks = [
+      makeTask({ id: "a", status: "failed" }),
+      makeTask({ id: "a", status: "done" }),
+      makeTask({ id: "b", dependsOn: ["a"], status: "blocked" }),
+    ];
+    expect(propagateFailures(tasks)).toEqual(["b"]);
+    expect(tasks[2]!.lastError).toBe("depends on failed: a");
   });
 
   it("handles a self-referential dependsOn gracefully (no infinite loop)", () => {

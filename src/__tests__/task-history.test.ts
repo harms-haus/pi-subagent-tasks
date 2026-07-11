@@ -196,6 +196,68 @@ describe("get_task_history", () => {
     ]);
   });
 
+  it("reports missing pools and tasks with useful diagnostics", async () => {
+    const paths = fixture();
+    const tool = createTaskHistoryTool(createMockAPI().api);
+
+    await expect(
+      tool.execute(
+        "call",
+        { poolId: "missing", taskId: "x" },
+        undefined,
+        undefined,
+        createMockContext({ cwd: paths.cwd }),
+      ),
+    ).rejects.toThrow('Pool "missing" not found.');
+    await expect(
+      tool.execute(
+        "call",
+        { poolId: "pool-1", taskId: "missing" },
+        undefined,
+        undefined,
+        createMockContext({ cwd: paths.cwd }),
+      ),
+    ).rejects.toThrow("Available task ids: task-1");
+  });
+
+  it("returns session read errors without failing the remaining history", async () => {
+    const paths = fixture();
+    const missing = join(paths.sessions, "missing.jsonl");
+    const malformed = join(paths.sessions, "malformed.jsonl");
+    writeFileSync(malformed, '{"valid":true}\nnot-json\n');
+    setResponseSessionFiles(paths.poolPath, [missing, malformed]);
+
+    const data = await getFullSessionData(paths.cwd);
+
+    expect(data.sessions[0]).toEqual({ sessionFile: missing, data: { error: expect.any(String) } });
+    expect(data.sessions[1].data).toEqual({ error: expect.any(String) });
+  });
+
+  it("preserves optional response error and omits absent session metadata", async () => {
+    const paths = fixture();
+    const statePath = join(paths.poolPath, "state.json");
+    const state = JSON.parse(readFileSync(statePath, "utf8"));
+    state.tasks[0].responseHistory = [
+      { atomPath: "0", lastText: "failed", success: false, completedAt: 4, error: "boom" },
+    ];
+    writeFileSync(statePath, JSON.stringify(state));
+
+    const tool = createTaskHistoryTool(createMockAPI().api);
+    const result = await tool.execute(
+      "call",
+      { poolId: "pool-1", taskId: "task-1", fullSessionData: true },
+      undefined,
+      undefined,
+      createMockContext({ cwd: paths.cwd }),
+    );
+
+    const details = result.details as { responses: unknown[]; sessions: unknown[] };
+    expect(details.responses).toEqual([
+      { atomPath: "0", success: false, completedAt: 4, response: "failed", error: "boom" },
+    ]);
+    expect(details.sessions).toEqual([]);
+  });
+
   it("rejects an in-pool symlink that resolves to an outside regular file", async () => {
     const paths = fixture();
     const outside = join(paths.cwd, "symlink-target.jsonl");

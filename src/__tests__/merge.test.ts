@@ -883,6 +883,254 @@ describe("serial queue behaviour", () => {
   });
 });
 
+describe("defensive failure and callback handling", () => {
+  it("aborts a regular merge failure with no conflicts without spawning a helper", async () => {
+    const { opts, git, agentRunner, onFailed, audit, getTask } = createBundle();
+    getTask.mockReturnValue(makeTask());
+    git.mergeFF = vi
+      .fn()
+      .mockResolvedValue({ stdout: "", stderr: "diverged", code: 1, killed: false });
+    git.gitExec = vi
+      .fn()
+      .mockResolvedValue({ stdout: "", stderr: "hook failed", code: 1, killed: false });
+    git.conflictedFiles = vi.fn().mockResolvedValue([]);
+
+    const worker = createMergeWorker(opts);
+    worker.enqueue("t-1");
+    await worker.processNext();
+
+    expect(git.mergeAbort).toHaveBeenCalledWith("/wt/pool");
+    expect(agentRunner.received).toHaveLength(0);
+    expect(onFailed).toHaveBeenCalledWith("t-1", "regular merge failed without conflicts");
+    expect(audit).toHaveBeenCalledWith("merge_failed", {
+      taskId: "t-1",
+      reason: "regular merge failed without conflicts",
+    });
+  });
+
+  it.each([
+    ["missing task", undefined, "task not found"],
+    ["missing metadata", makeTask({ branch: null }), "no worktree or branch"],
+  ])(
+    "continues the queue when an onFailed callback throws for %s",
+    async (_case, firstTask, reason) => {
+      vi.useFakeTimers();
+      const { opts, getTask, onFailed, onMerged, audit } = createBundle();
+      const second = makeTask({ id: "t-2", worktreePath: "/wt/t-2", branch: "branch-2" });
+      getTask.mockImplementation((id: string) => (id === "t-1" ? firstTask : second));
+      onFailed.mockImplementation(() => {
+        throw new Error("callback broke");
+      });
+
+      const worker = createMergeWorker(opts);
+      worker.enqueue("t-1");
+      worker.enqueue("t-2");
+      await worker.processNext();
+      await vi.advanceTimersByTimeAsync(0);
+
+      expect(onFailed).toHaveBeenCalledWith("t-1", reason);
+      expect(audit).toHaveBeenCalledWith("merge_callback_error", {
+        taskId: "t-1",
+        phase: "onFailed",
+        reason: "callback broke",
+      });
+      expect(onMerged).toHaveBeenCalledWith("t-2");
+      vi.useRealTimers();
+    },
+  );
+
+  it("reports a non-Error thrown by onMerged while retaining merge success", async () => {
+    const { opts, getTask, onMerged, onFailed, audit } = createBundle();
+    getTask.mockReturnValue(makeTask());
+    onMerged.mockImplementation(() => {
+      // Deliberately exercise defensive handling of non-Error callbacks.
+      // eslint-disable-next-line @typescript-eslint/only-throw-error
+      throw "notification failed";
+    });
+
+    const worker = createMergeWorker(opts);
+    worker.enqueue("t-1");
+    await worker.processNext();
+
+    expect(audit).toHaveBeenCalledWith("worktree_deleted", { taskId: "t-1" });
+    expect(audit).toHaveBeenCalledWith("merge_callback_error", {
+      taskId: "t-1",
+      phase: "onMerged",
+      reason: "notification failed",
+    });
+    expect(onFailed).not.toHaveBeenCalled();
+  });
+
+  it("swallows an abort cleanup failure but propagates the helper error", async () => {
+    const { opts, git, agentRunner, pools, onFailed, audit, getTask } = createBundle();
+    getTask.mockReturnValue(makeTask());
+    git.mergeFF = vi.fn().mockResolvedValue({ stdout: "", stderr: "", code: 1, killed: false });
+    git.conflictedFiles = vi.fn().mockResolvedValue(["src/conflict.ts"]);
+    git.mergeAbort = vi.fn().mockRejectedValue(new Error("abort cleanup failed"));
+    agentRunner.runAgent = vi.fn().mockRejectedValue(new Error("helper crashed"));
+
+    const worker = createMergeWorker(opts);
+    worker.enqueue("t-1");
+    await worker.processNext();
+
+    expect(pools.release).toHaveBeenCalledWith(undefined, undefined);
+    expect(git.mergeAbort).toHaveBeenCalledWith("/wt/pool");
+    expect(onFailed).toHaveBeenCalledWith("t-1", "helper crashed");
+    expect(audit).toHaveBeenCalledWith("merge_error", {
+      taskId: "t-1",
+      reason: "helper crashed",
+    });
+  });
+
+  it("aborts slot acquisition immediately when signalled and reports callback failures", async () => {
+    const { opts, git, pools, agentRunner, onFailed, audit, getTask } = createBundle();
+    const controller = new AbortController();
+    controller.abort();
+    opts.signal = controller.signal;
+    getTask.mockReturnValue(makeTask());
+    git.mergeFF = vi.fn().mockResolvedValue({ stdout: "", stderr: "", code: 1, killed: false });
+    git.conflictedFiles = vi.fn().mockResolvedValue(["src/conflict.ts"]);
+    pools.tryAcquire = vi.fn().mockReturnValue(false);
+    onFailed.mockImplementation(() => {
+      // Deliberately exercise defensive handling of non-Error callbacks.
+      // eslint-disable-next-line @typescript-eslint/only-throw-error
+      throw "failed callback threw";
+    });
+
+    const worker = createMergeWorker(opts);
+    worker.enqueue("t-1");
+    await worker.processNext();
+
+    expect(pools.tryAcquire).toHaveBeenCalledTimes(1);
+    expect(agentRunner.received).toHaveLength(0);
+    expect(git.mergeAbort).toHaveBeenCalledWith("/wt/pool");
+    expect(audit).toHaveBeenCalledWith("merge_callback_error", {
+      taskId: "t-1",
+      phase: "onFailed",
+      reason: "failed callback threw",
+    });
+  });
+
+  it("keeps the queue moving when the top-level failure callback itself throws", async () => {
+    vi.useFakeTimers();
+    const { opts, git, getTask, onFailed, onMerged, audit } = createBundle();
+    const first = makeTask();
+    const second = makeTask({ id: "t-2", worktreePath: "/wt/t-2", branch: "branch-2" });
+    getTask.mockImplementation((id: string) => (id === "t-1" ? first : second));
+    git.statusPorcelain = vi
+      .fn()
+      .mockImplementation((path: string) =>
+        path === "/wt/t-1" ? Promise.reject(new Error("status failed")) : Promise.resolve(""),
+      );
+    onFailed.mockImplementation(() => {
+      // Deliberately exercise defensive handling of non-Error callbacks.
+      // eslint-disable-next-line @typescript-eslint/only-throw-error
+      throw "callback string";
+    });
+
+    const worker = createMergeWorker(opts);
+    worker.enqueue("t-1");
+    worker.enqueue("t-2");
+    await worker.processNext();
+    await vi.advanceTimersByTimeAsync(0);
+
+    expect(audit).toHaveBeenCalledWith("merge_callback_error", {
+      taskId: "t-1",
+      phase: "onFailed",
+      reason: "callback string",
+    });
+    expect(onMerged).toHaveBeenCalledWith("t-2");
+    vi.useRealTimers();
+  });
+});
+
+describe("remaining callback diagnostics", () => {
+  it("preserves Error and non-Error callback diagnostics on every failure outcome", async () => {
+    const run = async (
+      configure: (bundle: MockBundle) => void,
+      thrown: unknown,
+      expected: string,
+    ): Promise<void> => {
+      const bundle = createBundle();
+      bundle.getTask.mockReturnValue(makeTask());
+      configure(bundle);
+      bundle.onFailed.mockImplementation(() => {
+        // The production API accepts arbitrary callbacks; exercise its defensive coercion.
+        throw thrown;
+      });
+      const worker = createMergeWorker(bundle.opts);
+      worker.enqueue("t-1");
+      await worker.processNext();
+      expect(bundle.audit).toHaveBeenCalledWith("merge_callback_error", {
+        taskId: "t-1",
+        phase: "onFailed",
+        reason: expected,
+      });
+    };
+
+    await run(
+      ({ git }) => {
+        git.statusPorcelain = vi.fn().mockRejectedValue(new Error("git failed"));
+      },
+      new Error("top callback"),
+      "top callback",
+    );
+    await run(
+      ({ getTask }) => getTask.mockReturnValue(undefined),
+      "missing callback",
+      "missing callback",
+    );
+    await run(
+      ({ getTask }) => getTask.mockReturnValue(makeTask({ branch: null })),
+      "metadata callback",
+      "metadata callback",
+    );
+
+    const regularFailure = ({ git }: MockBundle): void => {
+      git.mergeFF = vi.fn().mockResolvedValue({ stdout: "", stderr: "", code: 1, killed: false });
+      git.conflictedFiles = vi.fn().mockResolvedValue([]);
+    };
+    await run(regularFailure, new Error("regular callback"), "regular callback");
+    await run(regularFailure, "regular string", "regular string");
+
+    await run(
+      ({ git, pools, opts }) => {
+        git.mergeFF = vi.fn().mockResolvedValue({ stdout: "", stderr: "", code: 1, killed: false });
+        git.conflictedFiles = vi.fn().mockResolvedValue(["conflict.ts"]);
+        pools.tryAcquire = vi.fn().mockReturnValue(false);
+        const controller = new AbortController();
+        controller.abort();
+        opts.signal = controller.signal;
+      },
+      new Error("slot callback"),
+      "slot callback",
+    );
+
+    const unresolved = ({ git }: MockBundle): void => {
+      git.mergeFF = vi.fn().mockResolvedValue({ stdout: "", stderr: "", code: 1, killed: false });
+      git.conflictedFiles = vi.fn().mockResolvedValue(["conflict.ts"]);
+    };
+    await run(unresolved, new Error("unresolved callback"), "unresolved callback");
+    await run(unresolved, "unresolved string", "unresolved string");
+  });
+
+  it("preserves an Error diagnostic thrown by the success callback", async () => {
+    const { opts, getTask, onMerged, audit } = createBundle();
+    getTask.mockReturnValue(makeTask());
+    onMerged.mockImplementation(() => {
+      throw new Error("success callback failed");
+    });
+    const worker = createMergeWorker(opts);
+    worker.enqueue("t-1");
+    await worker.processNext();
+    expect(audit).toHaveBeenCalledWith("merge_callback_error", {
+      taskId: "t-1",
+      phase: "onMerged",
+      reason: "success callback failed",
+    });
+  });
+});
+
 describe("error handling", () => {
   it("catches errors in processOne and calls onFailed + audit", async () => {
     const { opts, git, onFailed, audit, getTask } = createBundle();

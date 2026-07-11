@@ -213,6 +213,20 @@ describe("spawnAgent", () => {
     expect(result.verdict).toEqual({ approved: false, feedback: "Needs work" });
   });
 
+  it("defaults malformed verdict feedback to an empty string", async () => {
+    const promise = spawnAgent(defaultOpts);
+    feedAndExit([
+      `{"type":"tool_execution_end","toolName":"gate_verdict","result":{"details":{"approved":true,"feedback":42}}}`,
+    ]);
+    expect((await promise).verdict).toEqual({ approved: true, feedback: "" });
+  });
+
+  it("ignores a gate verdict whose result is not an object", async () => {
+    const promise = spawnAgent(defaultOpts);
+    feedAndExit([`{"type":"tool_execution_end","toolName":"gate_verdict","result":"bad"}`]);
+    expect((await promise).verdict).toBeUndefined();
+  });
+
   it("yields undefined when result has no details and no boolean approved", async () => {
     const promise = spawnAgent(defaultOpts);
 
@@ -292,6 +306,12 @@ describe("spawnAgent", () => {
 
     const result = await promise;
     expect(result.sessionId).toBeUndefined();
+  });
+
+  it("ignores an empty session id", async () => {
+    const promise = spawnAgent(defaultOpts);
+    feedAndExit([`{"type":"session","id":""}`]);
+    expect((await promise).sessionId).toBeUndefined();
   });
 
   it("captures only the first session header (ignores subsequent ones)", async () => {
@@ -509,6 +529,20 @@ describe("spawnAgent", () => {
     expect(mockKill).toHaveBeenCalledTimes(1);
     expect(mockKill).toHaveBeenCalledWith(12_345, "SIGTERM");
     expect(onSettled).toHaveBeenCalledTimes(1);
+  });
+
+  it("stringifies non-Error values thrown while writing stdin", async () => {
+    const promise = spawnAgent({
+      ...defaultOpts,
+      onSpawn(proc) {
+        proc.stdin!.write = vi.fn(() => {
+          // Deliberately exercise defensive handling of hostile stream implementations.
+          // eslint-disable-next-line @typescript-eslint/only-throw-error
+          throw "string failure";
+        });
+      },
+    });
+    await expect(promise).resolves.toMatchObject({ exitCode: -1, stderr: "string failure" });
   });
 
   it("resolves once and terminates the child when stdin.end throws synchronously", async () => {
@@ -763,6 +797,25 @@ describe("spawnAgent", () => {
     const result = await promise;
     expect(result.stderr).toBe("x".repeat(STDERR_TAIL_MAX_CHARS - 1));
     expect(result.stderr).not.toMatch(/[\uD800-\uDFFF]/u);
+  });
+
+  it("does not repeat identical text from a turn_end fallback", async () => {
+    const onUpdate = vi.fn();
+    const promise = spawnAgent({ ...defaultOpts, onUpdate });
+    feedAndExit([
+      `{"type":"message_end","message":{"content":[{"type":"text","text":"same"}]}}`,
+      `{"type":"turn_end","message":{"content":[{"type":"text","text":"same"}]}}`,
+    ]);
+    expect((await promise).lastAssistantText).toBe("same");
+    expect(onUpdate).toHaveBeenCalledTimes(2);
+  });
+
+  it("tolerates tool calls with primitive arguments and absent optional callbacks", async () => {
+    const promise = spawnAgent(defaultOpts);
+    feedAndExit([
+      `{"type":"message_end","message":{"content":[{"type":"toolCall","name":"read","arguments":"bad"}]}}`,
+    ]);
+    await expect(promise).resolves.toMatchObject({ exitCode: 0, lastAssistantText: "" });
   });
 
   it("emits compact tool previews from message_end toolCall parts", async () => {

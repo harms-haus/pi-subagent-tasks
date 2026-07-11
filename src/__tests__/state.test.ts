@@ -11,7 +11,15 @@
  */
 
 import { describe, it, expect, vi, afterEach } from "vitest";
-import { existsSync, mkdtempSync, mkdirSync, readFileSync, rmSync, writeFileSync } from "node:fs";
+import {
+  existsSync,
+  mkdtempSync,
+  mkdirSync,
+  readFileSync,
+  readdirSync,
+  rmSync,
+  writeFileSync,
+} from "node:fs";
 import { join } from "node:path";
 import { tmpdir } from "node:os";
 
@@ -295,6 +303,35 @@ describe("writeState / readState", () => {
     expect(result).toBeUndefined();
   });
 
+  it.each([
+    ["mergeQueue", { id: "pool-1", tasks: [], status: "running", limits: {} }],
+    ["status", { id: "pool-1", tasks: [], mergeQueue: [], limits: {} }],
+    ["limits", { id: "pool-1", tasks: [], mergeQueue: [], status: "running", limits: null }],
+  ])("readState rejects malformed %s metadata", (_field, value) => {
+    const dir = makeTempDir();
+    writeFileSync(join(dir, STATE_FILE), JSON.stringify(value));
+    expect(readState(dir)).toBeUndefined();
+  });
+
+  it("writeState rethrows rename errors and removes its written temporary file", () => {
+    const poolDir = makeTempDir();
+    mkdirSync(join(poolDir, STATE_FILE));
+
+    let thrown: unknown;
+    try {
+      writeState(poolDir, makePool([]));
+    } catch (error) {
+      thrown = error;
+    }
+
+    expect(thrown).toBeInstanceOf(Error);
+    expect(thrown).toMatchObject({ code: "EISDIR", syscall: "rename" });
+    expect(readdirSync(poolDir)).toEqual([STATE_FILE]);
+    expect(readdirSync(poolDir).filter((entry) => entry.startsWith(`.${STATE_FILE}.tmp.`))).toEqual(
+      [],
+    );
+  });
+
   it("readState returns undefined when id is not a string", () => {
     const dir = makeTempDir();
     writeFileSync(
@@ -383,6 +420,17 @@ describe("AuditLogger", () => {
     expect(typeof parsed.t).toBe("string");
     // ISO 8601 check: starts with 4-digit year
     expect(parsed.t).toMatch(/^\d{4}-\d{2}-\d{2}T/);
+  });
+
+  it("close is idempotent and logging after close is a no-op", () => {
+    const dir = makeTempDir();
+    const logger = new AuditLogger(dir, "pool-1");
+    logger.log("before", {});
+    logger.close();
+    logger.close();
+    logger.log("after", {});
+
+    expect(readFileSync(join(dir, AUDIT_FILE), "utf8").trim().split("\n")).toHaveLength(1);
   });
 
   it("payload fields are merged into the log line", () => {

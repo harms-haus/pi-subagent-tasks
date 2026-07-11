@@ -45,10 +45,12 @@ vi.mock("../worktrees", () => ({
   isGitRepo: vi.fn(),
   canUseWorktrees: vi.fn(),
   verifyWorktrees: vi.fn(),
+  removeTaskWorktree: vi.fn(),
 }));
 
 vi.mock("../profiles", () => ({
   seedMergeHelperProfile: vi.fn(),
+  resolveProfile: vi.fn(),
 }));
 
 vi.mock("tree-kill", () => ({
@@ -246,6 +248,11 @@ describe("run_tasks tool", () => {
     (worktreesModule.createTaskWorktree as ReturnType<typeof vi.fn>).mockResolvedValue({
       path: "/mock/task-worktree",
       branch: "pi-subagent-task/my-pool/t-1",
+    });
+    (worktreesModule.ensureExcludeEntry as ReturnType<typeof vi.fn>).mockResolvedValue(undefined);
+    (worktreesModule.removeTaskWorktree as ReturnType<typeof vi.fn>).mockResolvedValue(undefined);
+    (profilesModule.resolveProfile as ReturnType<typeof vi.fn>).mockImplementation(() => {
+      throw new Error("unknown profile");
     });
 
     // Build tool with mocks.
@@ -890,6 +897,354 @@ describe("run_tasks tool", () => {
     expect(stateModule.reconcilePoolOnResume).toHaveBeenCalled();
     expect(worktreesModule.createTaskWorktree).toHaveBeenCalled();
     expect(result.content).toHaveLength(1);
+  });
+
+  describe("defensive resume and cleanup behavior", () => {
+    function resumedTask(overrides: Record<string, unknown> = {}) {
+      return {
+        id: "t-1",
+        title: undefined,
+        prompt: "Do the thing",
+        profile: undefined,
+        dependsOn: [],
+        compose: { type: "agent" as const },
+        cursor: { kind: "agent" as const, path: "0", state: "pending" as const },
+        status: "parked" as const,
+        retryCount: 0,
+        runningAgentCount: 0,
+        worktreePath: "/old/task",
+        branch: "old-branch",
+        sessionFiles: [],
+        downstreamCount: 0,
+        lastError: undefined,
+        startedAt: undefined,
+        outputLines: [],
+        toolCallCount: 0,
+        ...overrides,
+      };
+    }
+
+    it.each([undefined, "", 42])(
+      "rejects invalid resume id %p without reading state",
+      async (resume) => {
+        await expect(
+          tool.execute("bad-resume", { resume }, undefined, undefined, createMockContext()),
+        ).rejects.toThrow(resume === undefined ? /name.*required/i : /resume.*non-empty/i);
+
+        expect(stateModule.readState).not.toHaveBeenCalled();
+        expect(schedulerModule.createComposeScheduler).not.toHaveBeenCalled();
+      },
+    );
+
+    it("uses worktree verification and recreates stale worktrees that have no completed atoms", async () => {
+      const task = resumedTask();
+      const saved = { ...MINIMAL_POOL_STATE, tasks: [task], mergeQueue: ["obsolete"] };
+      vi.mocked(stateModule.readState).mockReturnValue(saved);
+      vi.mocked(worktreesModule.verifyWorktrees).mockResolvedValue({ missing: [], stale: ["t-1"] });
+      vi.mocked(stateModule.reconcilePoolOnResume).mockImplementation(async (pool, options) => ({
+        pool,
+        missingWorktrees: (await options?.verifyWorktrees?.(pool)) ?? [],
+      }));
+      vi.mocked(worktreesModule.createTaskWorktree).mockResolvedValue({
+        path: "/fresh/task",
+        branch: "fresh-branch",
+      });
+
+      await tool.execute("stale", { resume: "my-pool" }, undefined, undefined, createMockContext());
+
+      expect(worktreesModule.verifyWorktrees).toHaveBeenCalledWith(
+        expect.anything(),
+        saved,
+        "/test/repo",
+      );
+      expect(worktreesModule.removeTaskWorktree).toHaveBeenCalledWith(
+        expect.anything(),
+        "/old/task",
+        "old-branch",
+        "/test/repo",
+      );
+      expect(task).toMatchObject({ worktreePath: "/fresh/task", branch: "fresh-branch" });
+      expect(saved.mergeQueue).toEqual([]);
+    });
+
+    it("preserves a stale worktree when nested cursor progress is complete", async () => {
+      const task = resumedTask({
+        cursor: {
+          kind: "gateLoop",
+          path: "0",
+          state: "running",
+          workCursor: { kind: "agent", path: "0.w", state: "done" },
+        },
+      });
+      const saved = { ...MINIMAL_POOL_STATE, tasks: [task] };
+      vi.mocked(stateModule.readState).mockReturnValue(saved);
+      vi.mocked(worktreesModule.verifyWorktrees).mockResolvedValue({ missing: [], stale: ["t-1"] });
+      vi.mocked(stateModule.reconcilePoolOnResume).mockImplementation(async (pool, options) => ({
+        pool,
+        missingWorktrees: (await options?.verifyWorktrees?.(pool)) ?? [],
+      }));
+
+      await tool.execute(
+        "progress",
+        { resume: "my-pool" },
+        undefined,
+        undefined,
+        createMockContext(),
+      );
+
+      expect(worktreesModule.removeTaskWorktree).not.toHaveBeenCalled();
+      expect(worktreesModule.createTaskWorktree).not.toHaveBeenCalled();
+      const logger = vi.mocked(stateModule.AuditLogger).mock.results[0]?.value;
+      expect(logger.log).toHaveBeenCalledWith(
+        "worktree_stale",
+        expect.objectContaining({ taskId: "t-1", reason: "has-progress" }),
+      );
+    });
+
+    it.each([
+      [false, "/old/task", "done", 0],
+      [true, null, "done", 0],
+      [true, "/old/task", "running", 1],
+    ])(
+      "reconciles a completed cursor (worktree=%s, path=%s) to %s",
+      async (worktree, worktreePath, expectedStatus, queued) => {
+        const task = resumedTask({
+          cursor: { kind: "agent", path: "0", state: "done" },
+          status: "failed",
+          worktreePath,
+        });
+        const saved = { ...MINIMAL_POOL_STATE, worktree, tasks: [task], mergeQueue: ["stale"] };
+        vi.mocked(stateModule.readState).mockReturnValue(saved);
+        vi.mocked(stateModule.reconcilePoolOnResume).mockResolvedValue({
+          pool: saved,
+          missingWorktrees: [],
+        });
+        let queueAtSchedule: string[] = [];
+        if (queued === 1) {
+          const scheduler = createMockScheduler();
+          scheduler.globalSchedule.mockImplementation(() => {
+            queueAtSchedule = [...saved.mergeQueue];
+            saved.mergeQueue.length = 0;
+          });
+          scheduler.isComplete.mockReturnValue(true);
+          vi.mocked(schedulerModule.createComposeScheduler).mockReturnValue(scheduler);
+        }
+
+        await tool.execute(
+          "completed",
+          { resume: "my-pool" },
+          undefined,
+          undefined,
+          createMockContext(),
+        );
+
+        expect(task.status).toBe(expectedStatus);
+        if (queued === 1) expect(queueAtSchedule).toEqual(["t-1"]);
+        else expect(saved.mergeQueue).toEqual([]);
+      },
+    );
+
+    it("cleans up a created pool worktree and preserves the original setup failure", async () => {
+      vi.mocked(worktreesModule.ensureExcludeEntry).mockRejectedValue(new Error("exclude denied"));
+
+      await expect(
+        tool.execute(
+          "cleanup",
+          { name: "Cleanup", tasks: [{ prompt: "A" }] },
+          undefined,
+          undefined,
+          createMockContext(),
+        ),
+      ).rejects.toThrow("Worktree creation failed: exclude denied");
+
+      expect(worktreesModule.removeTaskWorktree).toHaveBeenCalledWith(
+        expect.anything(),
+        "/mock/pool-worktree",
+        "pi-subagent-task/my-pool",
+        "/test/repo",
+      );
+      expect(stateModule.writeState).not.toHaveBeenCalled();
+    });
+
+    it("does not mask setup failure when best-effort cleanup also fails", async () => {
+      vi.mocked(worktreesModule.ensureExcludeEntry).mockRejectedValue("exclude failed");
+      vi.mocked(worktreesModule.removeTaskWorktree).mockRejectedValue(new Error("cleanup failed"));
+
+      await expect(
+        tool.execute(
+          "cleanup-fails",
+          { name: "Cleanup", tasks: [{ prompt: "A" }] },
+          undefined,
+          undefined,
+          createMockContext(),
+        ),
+      ).rejects.toThrow("Worktree creation failed: exclude failed");
+
+      expect(worktreesModule.removeTaskWorktree).toHaveBeenCalledOnce();
+      expect(schedulerModule.createComposeScheduler).not.toHaveBeenCalled();
+    });
+  });
+
+  describe("orchestration callback boundaries", () => {
+    it("resolves known profiles and leaves unknown profiles unconstrained", async () => {
+      let schedulerOptions:
+        Parameters<typeof schedulerModule.createComposeScheduler>[0] | undefined;
+      vi.mocked(profilesModule.resolveProfile).mockImplementation((name) => {
+        if (name === "known") return { provider: "openai", model: "gpt-test" };
+        throw new Error("missing");
+      });
+      vi.mocked(schedulerModule.createComposeScheduler).mockImplementation((options) => {
+        schedulerOptions = options;
+        return createMockScheduler();
+      });
+
+      await tool.execute(
+        "profiles",
+        { name: "Profiles", tasks: [{ prompt: "A" }] },
+        undefined,
+        undefined,
+        createMockContext(),
+      );
+
+      expect(schedulerOptions).toBeDefined();
+      expect(schedulerOptions!.profileResolver!("known")).toEqual({
+        provider: "openai",
+        model: "gpt-test",
+      });
+      expect(schedulerOptions!.profileResolver!("unknown")).toEqual({});
+    });
+
+    it("applies successful and failed merge callbacks only to matching tasks", async () => {
+      let mergeOptions: Parameters<typeof mergeModule.createMergeWorker>[0] | undefined;
+      vi.mocked(mergeModule.createMergeWorker).mockImplementation((options) => {
+        mergeOptions = options;
+        return createMockMergeWorker();
+      });
+      const scheduler = createMockScheduler();
+      vi.mocked(schedulerModule.createComposeScheduler).mockReturnValue(scheduler);
+
+      await tool.execute(
+        "merge-results",
+        { name: "Merge Results", tasks: [{ id: "known", prompt: "A" }] },
+        undefined,
+        undefined,
+        createMockContext(),
+      );
+
+      const pool = vi.mocked(stateModule.writeState).mock.calls.at(-1)?.[1];
+      const task = pool?.tasks[0];
+      expect(task).toBeDefined();
+
+      mergeOptions?.onFailed("known", "conflict");
+      expect(task).toMatchObject({ status: "failed", lastError: "conflict" });
+      mergeOptions?.onFailed("absent", "ignored");
+      expect(task?.lastError).toBe("conflict");
+
+      if (task) {
+        task.worktreePath = "/task";
+        task.branch = "task-branch";
+      }
+      mergeOptions?.onMerged("known");
+      expect(task).toMatchObject({ status: "done", worktreePath: null, branch: null });
+      mergeOptions?.onMerged("absent");
+      expect(scheduler.mergeComplete).toHaveBeenCalledTimes(4);
+    });
+
+    it("restarts shared-cwd tasks without worktree operations", async () => {
+      let schedulerOptions:
+        Parameters<typeof schedulerModule.createComposeScheduler>[0] | undefined;
+      vi.mocked(schedulerModule.createComposeScheduler).mockImplementation((options) => {
+        schedulerOptions = options;
+        return createMockScheduler();
+      });
+
+      await tool.execute(
+        "shared-restart",
+        { name: "Shared Restart", worktree: false, tasks: [{ prompt: "A" }] },
+        undefined,
+        undefined,
+        createMockContext(),
+      );
+
+      const pool = vi.mocked(stateModule.writeState).mock.calls.at(-1)?.[1];
+      const task = pool?.tasks[0];
+      expect(task).toBeDefined();
+      if (task) {
+        task.worktreePath = "/stale";
+        task.branch = "stale";
+        task.sessionFiles = ["old-session"];
+        task.cursor.state = "done";
+        expect(schedulerOptions?.onTaskRestart).toBeDefined();
+        await schedulerOptions!.onTaskRestart!(task);
+      }
+
+      expect(task).toMatchObject({
+        worktreePath: "/test/repo",
+        branch: null,
+        sessionFiles: [],
+        cursor: expect.objectContaining({ state: "pending" }),
+      });
+      expect(worktreesModule.removeTaskWorktree).not.toHaveBeenCalled();
+      expect(worktreesModule.createTaskWorktree).not.toHaveBeenCalled();
+    });
+
+    it("marks shared-cwd tasks done when the scheduler requests a merge", async () => {
+      let enqueue: ((taskId: string) => void) | undefined;
+      vi.mocked(schedulerModule.createComposeScheduler).mockImplementation((options) => {
+        enqueue = options.onMergeEnqueue;
+        const scheduler = createMockScheduler();
+        scheduler.globalSchedule.mockImplementation(() => {
+          enqueue?.("t-1");
+        });
+        return scheduler;
+      });
+
+      await tool.execute(
+        "shared-merge",
+        { name: "Shared", worktree: false, tasks: [{ prompt: "A" }] },
+        undefined,
+        undefined,
+        createMockContext(),
+      );
+
+      const pool = vi.mocked(stateModule.writeState).mock.calls.at(-1)?.[1];
+      expect(pool?.tasks[0]?.status).toBe("done");
+      expect(
+        vi.mocked(mergeModule.createMergeWorker).mock.results[0]?.value.enqueue,
+      ).not.toHaveBeenCalled();
+    });
+
+    it("retries after ensureWorktrees rejects and tolerates a throwing live-update consumer", async () => {
+      vi.useFakeTimers();
+      try {
+        let checks = 0;
+        const scheduler = createMockScheduler();
+        scheduler.globalSchedule.mockImplementation(() => undefined);
+        scheduler.ensureWorktrees
+          .mockRejectedValueOnce(new Error("transient"))
+          .mockImplementation(async () => {
+            checks += 1;
+          });
+        scheduler.isComplete.mockImplementation(() => checks > 0);
+        vi.mocked(schedulerModule.createComposeScheduler).mockReturnValue(scheduler);
+
+        const execution = tool.execute(
+          "retry-fixed-point",
+          { name: "Retry", tasks: [{ prompt: "A" }] },
+          undefined,
+          vi.fn(() => {
+            throw new Error("consumer failed");
+          }),
+          createMockContext(),
+        );
+        await vi.advanceTimersByTimeAsync(1100);
+        await execution;
+
+        expect(scheduler.ensureWorktrees).toHaveBeenCalledTimes(2);
+      } finally {
+        vi.useRealTimers();
+      }
+    });
   });
 
   // ── Test 16: Scheduler → merge-worker data flow ─────────────────────
