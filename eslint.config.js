@@ -4,7 +4,14 @@ import prettier from "eslint-config-prettier";
 
 export default tseslint.config(
   {
-    ignores: ["node_modules/", "dist/", "coverage/", "vitest.config.ts", "eslint.config.js"],
+    ignores: [
+      "node_modules/",
+      "dist/",
+      "coverage/",
+      ".pi/subagent-tasks/",
+      "vitest.config.ts",
+      "eslint.config.js",
+    ],
   },
   js.configs.recommended,
   ...tseslint.configs.strictTypeChecked,

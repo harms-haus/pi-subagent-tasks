@@ -51,7 +51,7 @@ function createMockGitOps(): GitOps {
   };
 
   return {
-    gitExec: vi.fn().mockResolvedValue({ stdout: "", stderr: "", code: 0, killed: false }),
+    gitExec: vi.fn().mockResolvedValue({ stdout: "", stderr: "conflict", code: 1, killed: false }),
     lock,
     statusPorcelain: vi.fn().mockResolvedValue(""),
     conflictedFiles: vi.fn().mockResolvedValue([]),
@@ -662,33 +662,27 @@ describe("merge conflict — FF failure", () => {
     expect(git.mergeAbort).toHaveBeenCalledWith("/wt/pool");
   });
 
-  it("FF failure without conflicts → mergeAbort + onFailed (no helper spawn)", async () => {
-    const { opts, git, onFailed, audit, agentRunner, getTask } = createBundle();
+  it("FF failure falls back to a regular merge and succeeds without conflicts", async () => {
+    const { opts, git, onMerged, onFailed, audit, agentRunner, getTask } = createBundle();
     const task = makeTask();
     getTask.mockReturnValue(task);
 
-    // FF merge fails but conflictedFiles returns empty (diverged branches).
     git.mergeFF = vi.fn().mockResolvedValue({ stdout: "", stderr: "", code: 1, killed: false });
-    git.conflictedFiles = vi.fn().mockResolvedValue([]);
+    git.gitExec = vi.fn().mockResolvedValue({ stdout: "", stderr: "", code: 0, killed: false });
 
     const worker = createMergeWorker(opts);
     worker.enqueue("t-1");
     await worker.processNext();
 
-    // Merge was aborted
-    expect(git.mergeAbort).toHaveBeenCalledWith("/wt/pool");
-
-    // Failed audit without 'conflict' event
-    expect(audit).toHaveBeenCalledWith("merge_conflict", { taskId: "t-1" });
-    expect(audit).toHaveBeenCalledWith("merge_failed", {
-      taskId: "t-1",
-      reason: "FF failed without conflicts",
-    });
-
-    // onFailed with the correct reason
-    expect(onFailed).toHaveBeenCalledWith("t-1", "FF failed without conflicts");
-
-    // No helper was spawned
+    expect(git.gitExec).toHaveBeenCalledWith(
+      ["merge", "--no-edit", "pi-subagent-task/test/t-1"],
+      "/wt/pool",
+    );
+    expect(audit).toHaveBeenCalledWith("merge_fallback", { taskId: "t-1" });
+    expect(audit).toHaveBeenCalledWith("worktree_merged", { taskId: "t-1" });
+    expect(onMerged).toHaveBeenCalledWith("t-1");
+    expect(onFailed).not.toHaveBeenCalled();
+    expect(git.mergeAbort).not.toHaveBeenCalled();
     expect(agentRunner.received).toHaveLength(0);
   });
 

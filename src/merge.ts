@@ -205,7 +205,19 @@ export function createMergeWorker(opts: MergeWorkerOptions): MergeWorker {
       return;
     }
 
-    // ── Step 5: FF failed — check for conflicts ─────────────────────────
+    // ── Step 5: FF failed — fall back to a regular merge ────────────────
+    // Divergence is normal when sibling task branches were created from the
+    // same pool HEAD. A failed --ff-only is therefore not a task failure.
+    opts.audit("merge_fallback", { taskId });
+    const mergeResult = await opts.git.lock(() =>
+      opts.git.gitExec(["merge", "--no-edit", branch], opts.poolWorktree),
+    );
+    if (mergeResult.code === 0) {
+      await handleFfSuccess(taskId, worktreePath, branch);
+      return;
+    }
+
+    // ── Step 6: regular merge conflicted/failed ──────────────────────────
     await handleMergeConflict(taskId, task, worktreePath, branch);
   }
 
@@ -247,10 +259,10 @@ export function createMergeWorker(opts: MergeWorkerOptions): MergeWorker {
    * so the cap is never exceeded. If no slot becomes available within the
    * bounded wait, the merge is aborted and reported as failed.
    *
-   * Edge case — if `mergeFF` fails but there are no conflicting files (e.g.
-   * branches have diverged without overlapping changes), we abort the merge
-   * immediately and report failure rather than spawning a helper with
-   * nothing to resolve.
+   * Edge case — if the regular merge fails but reports no unmerged files
+   * (for example a hook or repository-state error), abort and report the
+   * actual merge diagnostic rather than spawning a helper with nothing to
+   * resolve.
    */
   async function handleMergeConflict(
     taskId: string,
@@ -262,13 +274,13 @@ export function createMergeWorker(opts: MergeWorkerOptions): MergeWorker {
 
     const conflictFiles = await opts.git.conflictedFiles(opts.poolWorktree);
 
-    // Guard: FF failed without any true conflicts (e.g. diverged branches).
-    // Don't spawn a helper — there's nothing to resolve.
+    // A non-conflict merge failure cannot be repaired by the helper.
     if (conflictFiles.length === 0) {
       await opts.git.mergeAbort(opts.poolWorktree);
-      opts.audit("merge_failed", { taskId, reason: "FF failed without conflicts" });
+      const reason = "regular merge failed without conflicts";
+      opts.audit("merge_failed", { taskId, reason });
       try {
-        opts.onFailed(taskId, "FF failed without conflicts");
+        opts.onFailed(taskId, reason);
       } catch (err) {
         opts.audit("merge_callback_error", {
           taskId,

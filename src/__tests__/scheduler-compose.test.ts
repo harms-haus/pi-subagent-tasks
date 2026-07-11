@@ -388,14 +388,17 @@ describe("compose scheduler integration", () => {
     // Track iterations via call count
     let workCallCount = 0;
     let reviewCallCount = 0;
+    const workDemands: AgentDemand[] = [];
 
     const runner: AgentRunner = {
       async runAgent(demand: AgentDemand) {
         if (demand.atomPath === "0.work") {
           workCallCount++;
+          workDemands.push({ ...demand });
           return {
             success: true,
             lastText: `work-output-v${workCallCount}`,
+            sessionFile: `/sessions/work-${workCallCount}.jsonl`,
             exitCode: 0,
             durationMs: 0,
           };
@@ -446,9 +449,17 @@ describe("compose scheduler integration", () => {
     expect(task.status).toBe("done");
     expect(scheduler.isComplete()).toBe(true);
 
-    // Each work run after the first should see accumulated feedback
-    // (We can't easily check the prompt from the runner here, but the
-    //  correct cursor state transitions validate the flow.)
+    // Rejected work resumes the prior worker session and receives that
+    // iteration's exact reviewer feedback in the resumed user prompt.
+    expect(workDemands[0]?.resumeSessionFile).toBeUndefined();
+    expect(workDemands[1]?.resumeSessionFile).toBe("/sessions/work-1.jsonl");
+    expect(workDemands[1]?.effectivePrompt).toContain(
+      "Previous review feedback:\nneeds improvement attempt 1",
+    );
+    expect(workDemands[2]?.resumeSessionFile).toBe("/sessions/work-2.jsonl");
+    expect(workDemands[2]?.effectivePrompt).toContain(
+      "Previous review feedback:\nneeds improvement attempt 2",
+    );
   });
 
   // ── Test 5: gateLoop exhausted ──────────────────────────────────────────
