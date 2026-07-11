@@ -691,6 +691,37 @@ describe("scheduler core", () => {
     expect(scheduler.isComplete()).toBe(true);
   });
 
+  it("propagates failed dependencies before fixed-point detection", () => {
+    const pool = createPool({
+      tasks: [
+        makeTask({ id: "failed", status: "failed" }),
+        makeTask({ id: "ready-dependent", status: "ready", dependsOn: ["failed"] }),
+        makeTask({ id: "blocked-dependent", status: "blocked", dependsOn: ["ready-dependent"] }),
+      ],
+    });
+    const runAgent = vi.fn<AgentRunner["runAgent"]>();
+    const scheduler = createScheduler({
+      pool,
+      pools: createPoolCoordinator(pool.limits),
+      agentRunner: { runAgent },
+      callbacks: stubCallbacks(),
+      sessionDir: SESSION_DIR,
+    });
+
+    scheduler.globalSchedule();
+
+    expect(runAgent).not.toHaveBeenCalled();
+    expect(pool.tasks[1]).toMatchObject({
+      status: "failed",
+      lastError: "depends on failed: failed",
+    });
+    expect(pool.tasks[2]).toMatchObject({
+      status: "failed",
+      lastError: "depends on failed: ready-dependent",
+    });
+    expect(scheduler.isComplete()).toBe(true);
+  });
+
   // ── Additional coverage: mergeComplete public method ───────────────
   it("mergeComplete removes task from queue and allows fixed point to be reached", async () => {
     // When merges are processed asynchronously (onMergeEnqueue is a no-op),

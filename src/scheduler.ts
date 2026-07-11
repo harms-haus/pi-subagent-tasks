@@ -29,7 +29,7 @@ import type {
   TaskRuntime,
 } from "./types";
 import type { PoolCoordinator } from "./pools";
-import { canTransition, depsAllDone, isFixedPoint } from "./status";
+import { canTransition, depsAllDone, isFixedPoint, propagateFailures } from "./status";
 import { nextWantedAgents, advanceComposeCursor, type ProfileResolver } from "./atoms";
 import type { AdvanceHandlers } from "./atoms";
 import { handleGateLoopResult, needsReminderRetry, buildReviewerReminder } from "./gateloop";
@@ -513,7 +513,12 @@ export function createScheduler(opts: SchedulerOptions): Scheduler {
         }
       }
 
-      // ── 2. Unblock tasks whose dependencies are now all done ──────
+      // ── 2. Propagate terminal failures, then unblock tasks whose
+      // dependencies are now all done. This must happen before candidate
+      // selection: a ready task with a failed dependency cannot run, but it
+      // also prevents fixed-point detection and otherwise strands the pool
+      // with zero agents indefinitely.
+      propagateFailures(opts.pool.tasks);
       const taskMap = buildTaskMap();
 
       for (const task of opts.pool.tasks) {
