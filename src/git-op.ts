@@ -207,12 +207,12 @@ export function createGitOps(pi: ExtensionAPI): GitOps {
         args.push("-f", "-f");
       }
       args.push(opts.path);
-      return gitExec(args, opts.cwd);
+      return gitExec(args, opts.cwd).then(checkCode);
     });
   }
 
   function worktreePrune(cwd?: string): Promise<ExecResult> {
-    return lock(() => gitExec(["worktree", "prune"], cwd));
+    return lock(() => gitExec(["worktree", "prune"], cwd).then(checkCode));
   }
 
   function branchDelete(opts: {
@@ -224,7 +224,7 @@ export function createGitOps(pi: ExtensionAPI): GitOps {
       const args = ["branch"];
       args.push(opts.force ? "-D" : "-d");
       args.push(opts.name);
-      return gitExec(args, opts.cwd);
+      return gitExec(args, opts.cwd).then(checkCode);
     });
   }
 
@@ -233,13 +233,13 @@ export function createGitOps(pi: ExtensionAPI): GitOps {
   }
 
   function mergeAbort(cwd?: string): Promise<ExecResult> {
-    return lock(() => gitExec(["merge", "--abort"], cwd));
+    return lock(() => gitExec(["merge", "--abort"], cwd).then(checkCode));
   }
 
   function commitAll(message: string, cwd?: string): Promise<ExecResult> {
     return lock(async () => {
-      await gitExec(["add", "-A"], cwd);
-      return gitExec(["commit", "-m", message], cwd);
+      checkCode(await gitExec(["add", "-A"], cwd));
+      return gitExec(["commit", "-m", message], cwd).then(checkCode);
     });
   }
 

@@ -461,6 +461,52 @@ describe("run_tasks tool", () => {
     expect(content0?.text ?? "").toContain("Pool: Abort Test");
   });
 
+  it("does not return an abort summary until scheduler retirement is complete", async () => {
+    vi.useFakeTimers();
+    try {
+      let retired = false;
+      const scheduler = {
+        globalSchedule: vi.fn(),
+        onAgentFinished: vi.fn(),
+        ensureWorktrees: vi.fn(async () => {}),
+        isComplete: vi.fn(() => retired),
+        mergeComplete: vi.fn(),
+      };
+      (schedulerModule.createComposeScheduler as ReturnType<typeof vi.fn>).mockReturnValue(
+        scheduler,
+      );
+
+      const ac = new AbortController();
+      const ctx = createMockContext();
+      let returned = false;
+      const execution = tool
+        .execute(
+          "call-7-terminal",
+          { name: "Terminal Abort", tasks: [{ prompt: "Run this task" }] },
+          ac.signal,
+          undefined,
+          ctx,
+        )
+        .then((result) => {
+          returned = true;
+          return result;
+        });
+
+      await vi.advanceTimersByTimeAsync(0);
+      ac.abort();
+      await vi.advanceTimersByTimeAsync(100);
+      expect(returned).toBe(false);
+
+      retired = true;
+      await vi.advanceTimersByTimeAsync(100);
+      const result = await execution;
+      expect(result.content[0]).toMatchObject({ type: "text" });
+      expect(returned).toBe(true);
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
   // ── Test 7b: CREATE with onUpdate callback ────────────────────────────
   it("accepts an onUpdate callback for live board updates", async () => {
     const ctx = createMockContext();

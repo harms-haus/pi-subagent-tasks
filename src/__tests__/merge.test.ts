@@ -396,6 +396,22 @@ describe("FF success path", () => {
     expect(opts.onFailed).not.toHaveBeenCalled();
   });
 
+  it("does not report merge success when required cleanup fails", async () => {
+    const { opts, git, onMerged, onFailed, audit, getTask } = createBundle();
+    getTask.mockReturnValue(makeTask());
+    git.worktreeRemove = vi.fn().mockRejectedValue(new Error("cleanup failed"));
+
+    const worker = createMergeWorker(opts);
+    worker.enqueue("t-1");
+    await worker.processNext();
+
+    expect(git.branchDelete).not.toHaveBeenCalled();
+    expect(git.worktreePrune).not.toHaveBeenCalled();
+    expect(audit).not.toHaveBeenCalledWith("worktree_deleted", { taskId: "t-1" });
+    expect(onMerged).not.toHaveBeenCalled();
+    expect(onFailed).toHaveBeenCalledWith("t-1", "cleanup failed");
+  });
+
   it("does NOT auto-commit when worktree is clean", async () => {
     const { opts, git, getTask } = createBundle();
     getTask.mockReturnValue(makeTask());

@@ -8,7 +8,13 @@
 
 import { describe, it, expect, vi, beforeEach, afterEach } from "vitest";
 import type { SpawnOptions } from "../spawner";
-import { LOOP_DETECT_COUNT, IDLE_TIMEOUT_MS, IDLE_DEBOUNCE_MS } from "../constants";
+import {
+  LOOP_DETECT_COUNT,
+  IDLE_TIMEOUT_MS,
+  IDLE_DEBOUNCE_MS,
+  ABORT_GRACE_MS,
+  ABORT_FORCE_MS,
+} from "../constants";
 
 // ── Hoisted mock state ───────────────────────────────────────────────────────
 // vi.hoisted() runs before vi.mock() factories, which run before imports.
@@ -48,6 +54,9 @@ vi.mock("tree-kill", () => ({
 // ── SUT import (after mocks are wired) ────────────────────────────────────────
 
 import { spawnAgent } from "../spawner";
+
+// Expected generous character bound for the documented stderr tail.
+const STDERR_TAIL_MAX_CHARS = 64 * 1024;
 
 // ── Test helpers ──────────────────────────────────────────────────────────────
 
@@ -401,6 +410,66 @@ describe("spawnAgent", () => {
     expect(result.exitCode).toBeNull();
   });
 
+  it("cancels abort escalation when the child closes during the grace period", async () => {
+    vi.useFakeTimers();
+    const ac = new AbortController();
+    const onSettled = vi.fn();
+    const promise = spawnAgent({ ...defaultOpts, signal: ac.signal }).then((result) => {
+      onSettled(result);
+      return result;
+    });
+
+    ac.abort();
+    expect(mockKill).toHaveBeenCalledTimes(1);
+    expect(mockKill).toHaveBeenLastCalledWith(12_345, "SIGTERM");
+
+    emitClose(null);
+    const result = await promise;
+    expect(result.exitCode).toBeNull();
+    expect(onSettled).toHaveBeenCalledTimes(1);
+
+    vi.advanceTimersByTime(ABORT_GRACE_MS + ABORT_FORCE_MS + 1);
+    await Promise.resolve();
+
+    expect(mockKill).toHaveBeenCalledTimes(1);
+    expect(onSettled).toHaveBeenCalledTimes(1);
+  });
+
+  it("cancels abort escalation when the child emits a terminal error", async () => {
+    vi.useFakeTimers();
+    const ac = new AbortController();
+    const promise = spawnAgent({ ...defaultOpts, signal: ac.signal });
+
+    ac.abort();
+    emitError("child failed while terminating");
+
+    await expect(promise).resolves.toMatchObject({
+      exitCode: -1,
+      stderr: expect.stringContaining("child failed while terminating"),
+    });
+
+    vi.advanceTimersByTime(ABORT_GRACE_MS + ABORT_FORCE_MS + 1);
+    expect(mockKill).toHaveBeenCalledTimes(1);
+    expect(mockKill).toHaveBeenCalledWith(12_345, "SIGTERM");
+  });
+
+  it("escalates and resolves within the abort bounds when the child never closes", async () => {
+    vi.useFakeTimers();
+    const ac = new AbortController();
+    const promise = spawnAgent({ ...defaultOpts, signal: ac.signal });
+
+    ac.abort();
+    vi.advanceTimersByTime(ABORT_GRACE_MS - 1);
+    expect(mockKill).toHaveBeenCalledTimes(1);
+
+    vi.advanceTimersByTime(1);
+    expect(mockKill).toHaveBeenNthCalledWith(2, 12_345, "SIGKILL");
+
+    vi.advanceTimersByTime(ABORT_FORCE_MS);
+    await expect(promise).resolves.toMatchObject({ exitCode: null });
+    expect(mockKill).toHaveBeenCalledTimes(2);
+  });
+
   // ── (e) Spawn error ───────────────────────────────────────────────────
 
   it("resolves with exitCode -1 on spawn error (ENOENT)", async () => {
@@ -468,19 +537,19 @@ describe("spawnAgent", () => {
     expect(result.exitCode).toBeNull();
   });
 
-  it("does NOT trigger idle timeout when activity keeps coming", async () => {
+  it("does NOT trigger idle timeout when valid events keep coming", async () => {
     vi.useFakeTimers();
 
     const promise = spawnAgent(defaultOpts);
 
-    // Keep emitting data within the debounce window
+    // Keep emitting parsed events within the debounce window.
     for (let tick = 0; tick < 10; tick++) {
       vi.advanceTimersByTime(IDLE_DEBOUNCE_MS / 2);
       emitStdout(`{"type":"ping"}\n`);
     }
 
     // Total elapsed is now 10 * (IDLE_DEBOUNCE_MS/2) ≈ 5 * IDLE_DEBOUNCE_MS
-    // which is > IDLE_TIMEOUT_MS, but activity kept resetting the debounce.
+    // which is > IDLE_TIMEOUT_MS, but valid activity kept resetting the debounce.
     expect(mockKill).not.toHaveBeenCalled();
 
     emitExit(0);
@@ -488,6 +557,84 @@ describe("spawnAgent", () => {
     const result = await promise;
     expect(result.loopDetected).toBe(false);
     expect(result.exitCode).toBe(0);
+  });
+
+  it("times out despite repeated invalid complete stdout lines", async () => {
+    vi.useFakeTimers();
+
+    const promise = spawnAgent(defaultOpts);
+
+    // Malformed complete lines arrive more frequently than the debounce, but
+    // none are agent events and therefore none should extend the idle window.
+    const interval = IDLE_DEBOUNCE_MS / 2;
+    const emissions = Math.ceil((IDLE_TIMEOUT_MS + IDLE_DEBOUNCE_MS) / interval);
+    for (let tick = 0; tick < emissions; tick++) {
+      vi.advanceTimersByTime(interval);
+      emitStdout("{not-json}\n");
+    }
+
+    expect(mockKill).toHaveBeenCalledWith(12_345, "SIGTERM");
+
+    emitClose(null);
+    await promise;
+  });
+
+  it("resets idle activity when a valid event is parsed", async () => {
+    vi.useFakeTimers();
+
+    const promise = spawnAgent(defaultOpts);
+
+    vi.advanceTimersByTime(IDLE_TIMEOUT_MS - 1_000);
+    emitStdout(`{"type":"ping"}\n`);
+
+    vi.advanceTimersByTime(IDLE_DEBOUNCE_MS - 1_000);
+    expect(mockKill).not.toHaveBeenCalled();
+
+    vi.advanceTimersByTime(2_000);
+    expect(mockKill).toHaveBeenCalledWith(12_345, "SIGTERM");
+
+    emitClose(null);
+    await promise;
+  });
+
+  it("does not count partial JSON as idle activity before it is parsed", async () => {
+    vi.useFakeTimers();
+
+    const promise = spawnAgent(defaultOpts);
+
+    vi.advanceTimersByTime(IDLE_TIMEOUT_MS - 1_000);
+    emitStdout(`{"type":"ping"`);
+    vi.advanceTimersByTime(2_000);
+
+    expect(mockKill).toHaveBeenCalledWith(12_345, "SIGTERM");
+
+    emitClose(null);
+    await promise;
+  });
+
+  it("resets idle activity only after split JSON is reassembled and parsed", async () => {
+    vi.useFakeTimers();
+    const onUpdate = vi.fn();
+    const promise = spawnAgent({ ...defaultOpts, onUpdate });
+
+    vi.advanceTimersByTime(IDLE_TIMEOUT_MS - 1_000);
+    emitStdout(`{"type":"ping"`);
+    expect(onUpdate).not.toHaveBeenCalled();
+
+    vi.advanceTimersByTime(500);
+    emitStdout("}\n");
+    expect(onUpdate).toHaveBeenCalledTimes(1);
+
+    // Successful parsing just before the original idle deadline extends the
+    // run by a full debounce window; receiving the partial chunk did not.
+    vi.advanceTimersByTime(IDLE_DEBOUNCE_MS - 1);
+    expect(mockKill).not.toHaveBeenCalled();
+
+    vi.advanceTimersByTime(1_000);
+    expect(mockKill).toHaveBeenCalledWith(12_345, "SIGTERM");
+
+    emitClose(null);
+    await promise;
   });
 
   // ── Edge cases ────────────────────────────────────────────────────────
@@ -517,6 +664,49 @@ describe("spawnAgent", () => {
     const result = await promise;
     expect(result.stderr).toBe("warning: something happened\nerror: failed\n");
     expect(result.exitCode).toBe(1);
+  });
+
+  it("retains stderr unchanged when it is within the documented tail bound", async () => {
+    const promise = spawnAgent(defaultOpts);
+    const stderr = "a".repeat(STDERR_TAIL_MAX_CHARS - 7) + "partial";
+
+    emitStderr(stderr.slice(0, 31));
+    emitStderr(stderr.slice(31));
+    emitExit(1);
+    emitClose(1);
+
+    expect((await promise).stderr).toBe(stderr);
+  });
+
+  it("retains the deterministic newest stderr tail across chunks and a partial line", async () => {
+    const promise = spawnAgent(defaultOpts);
+    const discarded = "old-line\n".repeat(7);
+    const newest = "n".repeat(STDERR_TAIL_MAX_CHARS - 8) + "partial!";
+    const stderr = discarded + newest;
+
+    emitStderr(stderr.slice(0, 17));
+    emitStderr(stderr.slice(17, STDERR_TAIL_MAX_CHARS + 11));
+    emitStderr(stderr.slice(STDERR_TAIL_MAX_CHARS + 11));
+    emitExit(2);
+    emitClose(2);
+
+    const result = await promise;
+    expect(result.stderr).toBe(stderr.slice(-STDERR_TAIL_MAX_CHARS));
+    expect(result.stderr).toHaveLength(STDERR_TAIL_MAX_CHARS);
+  });
+
+  it("does not split a surrogate pair at the stderr tail boundary", async () => {
+    const promise = spawnAgent(defaultOpts);
+    // A code-unit slice at the bound would retain only the emoji's low surrogate.
+    const stderr = "😀" + "x".repeat(STDERR_TAIL_MAX_CHARS - 1);
+
+    emitStderr(stderr);
+    emitExit(1);
+    emitClose(1);
+
+    const result = await promise;
+    expect(result.stderr).toBe("x".repeat(STDERR_TAIL_MAX_CHARS - 1));
+    expect(result.stderr).not.toMatch(/[\uD800-\uDFFF]/u);
   });
 
   it("emits compact tool previews from message_end toolCall parts", async () => {

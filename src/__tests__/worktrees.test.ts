@@ -172,6 +172,30 @@ describe("removeTaskWorktree", () => {
     expect(order).toEqual(["worktreeRemove", "branchDelete", "worktreePrune"]);
   });
 
+  it("stops before branch deletion and prune when worktree removal fails", async () => {
+    const git = createMockGitOps();
+    git.worktreeRemove = vi.fn().mockRejectedValue(new Error("remove failed"));
+
+    await expect(
+      removeTaskWorktree(git, "/wt/t-1", "pi-subagent-task/slug/t-1", "/repo"),
+    ).rejects.toThrow("remove failed");
+
+    expect(git.branchDelete).not.toHaveBeenCalled();
+    expect(git.worktreePrune).not.toHaveBeenCalled();
+  });
+
+  it("stops before prune when branch deletion fails", async () => {
+    const git = createMockGitOps();
+    git.branchDelete = vi.fn().mockRejectedValue(new Error("delete failed"));
+
+    await expect(
+      removeTaskWorktree(git, "/wt/t-1", "pi-subagent-task/slug/t-1", "/repo"),
+    ).rejects.toThrow("delete failed");
+
+    expect(git.worktreeRemove).toHaveBeenCalledOnce();
+    expect(git.worktreePrune).not.toHaveBeenCalled();
+  });
+
   it("passes force:true and cwd to worktreeRemove", async () => {
     const git = createMockGitOps();
 
@@ -288,6 +312,73 @@ describe("ensureExcludeEntry", () => {
     const content = readFileSync(excludeFile, "utf-8");
     expect(content).toBe(".pi/subagent-tasks/\n");
     expect(content.split("\n").filter(Boolean)).toHaveLength(1);
+  });
+
+  it("resolves a relative common directory from the repository cwd and remains idempotent", async () => {
+    const git = createMockGitOps();
+    git.gitExec = vi.fn().mockResolvedValue({
+      stdout: ".git\n",
+      stderr: "",
+      code: 0,
+      killed: false,
+    });
+
+    const excludeDir = join(tmpDir, ".git", "info");
+    mkdirSync(excludeDir, { recursive: true });
+    const excludeFile = join(excludeDir, "exclude");
+    writeFileSync(excludeFile, "# local exclusions\n", "utf-8");
+
+    await ensureExcludeEntry(git, tmpDir);
+    await ensureExcludeEntry(git, tmpDir);
+
+    expect(readFileSync(excludeFile, "utf-8")).toBe("# local exclusions\n\n.pi/subagent-tasks/\n");
+  });
+
+  it("rejects a failed common-directory lookup without mutating the filesystem", async () => {
+    const git = createMockGitOps();
+    git.gitExec = vi.fn().mockResolvedValue({
+      stdout: tmpDir + "\n",
+      stderr: "fatal: not a git repository",
+      code: 128,
+      killed: false,
+    });
+    const sentinel = join(tmpDir, "sentinel");
+    writeFileSync(sentinel, "unchanged", "utf-8");
+
+    await expect(ensureExcludeEntry(git, tmpDir)).rejects.toThrow();
+
+    expect(readFileSync(sentinel, "utf-8")).toBe("unchanged");
+    expect(existsSync(join(tmpDir, "info"))).toBe(false);
+  });
+
+  it("rejects whitespace-only common-directory output without mutating the filesystem", async () => {
+    const git = createMockGitOps();
+    git.gitExec = vi.fn().mockResolvedValue({
+      stdout: " \t\n",
+      stderr: "",
+      code: 0,
+      killed: false,
+    });
+    const sentinel = join(tmpDir, "sentinel");
+    writeFileSync(sentinel, "unchanged", "utf-8");
+
+    // A blank path is resolved against process.cwd(), so sandbox that path too.
+    const originalCwd = process.cwd();
+    process.chdir(tmpDir);
+    try {
+      let rejection: unknown;
+      try {
+        await ensureExcludeEntry(git, tmpDir);
+      } catch (error) {
+        rejection = error;
+      }
+
+      expect(readFileSync(sentinel, "utf-8")).toBe("unchanged");
+      expect(existsSync(join(process.cwd(), "info"))).toBe(false);
+      expect(rejection).toBeInstanceOf(Error);
+    } finally {
+      process.chdir(originalCwd);
+    }
   });
 
   it("calls git rev-parse --git-common-dir with the given cwd", async () => {

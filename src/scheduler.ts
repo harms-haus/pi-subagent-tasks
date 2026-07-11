@@ -213,10 +213,18 @@ export interface Scheduler {
 export function createScheduler(opts: SchedulerOptions): Scheduler {
   // ── Internal state ──────────────────────────────────────────────────────
   const inFlight = new Map<string, Promise<void>>();
+  const completing = new Set<symbol>();
   const demandMeta = new Map<string, { provider?: string; model?: string }>();
   let mergeInProgress = false;
   let complete = false;
   let scheduling = false;
+  let ensuringWorktrees: Promise<void> | undefined;
+
+  // AgentRunner is an injected seam and is not required to honour AbortSignal.
+  // Give such runners a bounded cleanup-only retirement window so cancellation
+  // cannot hang forever. A result arriving after retirement is ignored.
+  const ABORT_RETIREMENT_MS = 5_000;
+  const retirementTimers = new Map<string, ReturnType<typeof setTimeout>>();
 
   // ── Helpers ─────────────────────────────────────────────────────────────
 
@@ -238,16 +246,51 @@ export function createScheduler(opts: SchedulerOptions): Scheduler {
   function releaseAgent(taskId: string, atomPath: string): void {
     const key = `${taskId}:${atomPath}`;
     const meta = demandMeta.get(key);
-    if (meta !== undefined) {
-      opts.pools.release(meta.provider, meta.model);
-      demandMeta.delete(key);
+    if (meta === undefined) return;
+
+    opts.pools.release(meta.provider, meta.model);
+    demandMeta.delete(key);
+    const task = opts.pool.tasks.find((t) => t.id === taskId);
+    if (task) task.runningAgentCount = Math.max(0, task.runningAgentCount - 1);
+  }
+
+  function retireAgent(key: string, taskId: string, atomPath: string): void {
+    const timer = retirementTimers.get(key);
+    if (timer !== undefined) clearTimeout(timer);
+    retirementTimers.delete(key);
+    inFlight.delete(key);
+    releaseAgent(taskId, atomPath);
+  }
+
+  function beginAbortRetirement(): void {
+    complete = true;
+
+    // No new merges are dispatched after abort. Retain only the merge already
+    // handed to the worker so its normal completion can retire it; queued
+    // entries are transient scheduling state and will be rebuilt by resume
+    // reconciliation. Leaving them here would make run_tasks wait forever,
+    // since globalSchedule intentionally cannot dispatch them after abort.
+    if (mergeInProgress) {
+      opts.pool.mergeQueue.splice(1);
+    } else {
+      opts.pool.mergeQueue.splice(0);
     }
 
-    const task = opts.pool.tasks.find((t) => t.id === taskId);
-    if (task) {
-      task.runningAgentCount = Math.max(0, task.runningAgentCount - 1);
+    for (const key of inFlight.keys()) {
+      if (retirementTimers.has(key)) continue;
+      const separator = key.indexOf(":");
+      const taskId = key.slice(0, separator);
+      const atomPath = key.slice(separator + 1);
+      const timer = setTimeout(() => {
+        retireAgent(key, taskId, atomPath);
+      }, ABORT_RETIREMENT_MS);
+      timer.unref();
+      retirementTimers.set(key, timer);
     }
   }
+
+  opts.signal?.addEventListener("abort", beginAbortRetirement, { once: true });
+  if (opts.signal?.aborted) beginAbortRetirement();
 
   // ── tryAdvance ──────────────────────────────────────────────────────────
 
@@ -299,12 +342,14 @@ export function createScheduler(opts: SchedulerOptions): Scheduler {
         model: demand.model,
       });
 
+      const completionToken = Symbol(key);
       const p = opts.agentRunner
         .runAgent(demand, {
           sessionDir: opts.sessionDir,
           poolId: opts.pool.id,
           signal: opts.signal,
           onOutput: (text) => {
+            if (opts.signal?.aborted) return;
             const liveTask = opts.pool.tasks.find((t) => t.id === task.id);
             if (liveTask === undefined) return;
             const lines = text.split(/\r?\n/).filter((line) => line.trim().length > 0);
@@ -316,28 +361,34 @@ export function createScheduler(opts: SchedulerOptions): Scheduler {
         })
         .then(
           async (r) => {
-            // IMPORTANT: delete from inFlight BEFORE awaiting onAgentFinished
-            // so that globalSchedule() (called inside onAgentFinished) sees
-            // inFlight.size === 0 for fixed-point detection. The key is
-            // removed early so the scheduler can determine completion;
-            // async worktree recreation (onTaskRestart) keeps the task in
-            // "ready" state so isFixedPoint still returns false.
-            inFlight.delete(key);
-            await onAgentFinished(task.id, demand.atomPath, r);
+            retireAgent(key, task.id, demand.atomPath);
+            if (opts.signal?.aborted) return;
+            completing.add(completionToken);
+            try {
+              await onAgentFinished(task.id, demand.atomPath, r);
+            } finally {
+              completing.delete(completionToken);
+            }
           },
           async (error: unknown) => {
             // A runner can reject before spawning (for example, when profile
             // resolution fails). Route that through the normal failure/retry
             // path; merely releasing the slot leaves the task `running` with
             // zero agents forever.
-            inFlight.delete(key);
-            await onAgentFinished(task.id, demand.atomPath, {
-              success: false,
-              lastText: "",
-              exitCode: -1,
-              error: error instanceof Error ? error.message : String(error),
-              durationMs: 0,
-            });
+            retireAgent(key, task.id, demand.atomPath);
+            if (opts.signal?.aborted) return;
+            completing.add(completionToken);
+            try {
+              await onAgentFinished(task.id, demand.atomPath, {
+                success: false,
+                lastText: "",
+                exitCode: -1,
+                error: error instanceof Error ? error.message : String(error),
+                durationMs: 0,
+              });
+            } finally {
+              completing.delete(completionToken);
+            }
           },
         );
 
@@ -358,8 +409,12 @@ export function createScheduler(opts: SchedulerOptions): Scheduler {
     const task = opts.pool.tasks.find((t) => t.id === taskId);
     if (!task) return;
 
-    // Release pool slots and decrement running agent count.
+    // On cancellation completion is cleanup-only. This also makes direct or
+    // duplicate late notifications inert.
     releaseAgent(taskId, atomPath);
+    if (opts.signal?.aborted) return;
+
+    // Release pool slots and decrement running agent count.
 
     // Retain every completed execution in completion order. This includes
     // failures, soft retries, gate-loop rejections, and whole-task retries.
@@ -437,8 +492,14 @@ export function createScheduler(opts: SchedulerOptions): Scheduler {
         // If the callback throws, the task transitions to failed so the
         // scheduler does not hang.
         try {
-          await opts.callbacks.onTaskRestart?.(task);
+          // Stage callback-owned task mutations so a callback that resumes
+          // after cancellation cannot alter the live resumable state.
+          const restartedTask = structuredClone(task);
+          await opts.callbacks.onTaskRestart?.(restartedTask);
+          if (opts.signal?.aborted) return;
+          Object.assign(task, restartedTask);
         } catch (e) {
+          if (opts.signal?.aborted) return;
           task.status = "failed";
           task.lastError = `Worktree recreation failed after retry: ${e instanceof Error ? e.message : String(e)}`;
         }
@@ -501,7 +562,7 @@ export function createScheduler(opts: SchedulerOptions): Scheduler {
   function globalSchedule(): void {
     // If the signal was aborted, stop scheduling forever.
     if (opts.signal?.aborted) {
-      complete = true;
+      beginAbortRetirement();
       return;
     }
 
@@ -611,7 +672,7 @@ export function createScheduler(opts: SchedulerOptions): Scheduler {
     mergeInProgress = false;
 
     globalSchedule();
-    opts.callbacks.onUpdate();
+    if (!opts.signal?.aborted) opts.callbacks.onUpdate();
   }
 
   // ── ensureWorktrees (H1 / D10 / §10.1) ───────────────────────────────
@@ -630,9 +691,9 @@ export function createScheduler(opts: SchedulerOptions): Scheduler {
    * worktree once its parents are merged (depsAllDone), branched from the
    * pool's current HEAD — so it sees its parents' code.
    */
-  async function ensureWorktreesImpl(): Promise<void> {
+  async function runEnsureWorktrees(): Promise<void> {
     const cb = opts.callbacks.onEnsureWorktree;
-    if (cb === undefined) return;
+    if (cb === undefined || opts.signal?.aborted) return;
 
     const taskMap = buildTaskMap();
     const toEnsure = opts.pool.tasks.filter(
@@ -644,9 +705,16 @@ export function createScheduler(opts: SchedulerOptions): Scheduler {
     if (toEnsure.length === 0) return;
 
     for (const task of toEnsure) {
+      if (opts.signal?.aborted) return;
       try {
-        await cb(task);
+        // Worktree creation may outlive an abort. Give it a staged task so
+        // late callback mutation is committed only while the run is live.
+        const ensuredTask = structuredClone(task);
+        await cb(ensuredTask);
+        if (opts.signal?.aborted) return;
+        Object.assign(task, ensuredTask);
       } catch (error) {
+        if (opts.signal?.aborted) return;
         const message = error instanceof Error ? error.message : String(error);
         task.status = "failed";
         task.lastError = `Worktree creation failed: ${message}`;
@@ -664,6 +732,25 @@ export function createScheduler(opts: SchedulerOptions): Scheduler {
     globalSchedule();
   }
 
+  function ensureWorktreesImpl(): Promise<void> {
+    // Polling can begin another pass while the callback is still creating a
+    // worktree. Share the whole active pass so its task snapshot, failure
+    // handling, and final scheduling notification are performed only once.
+    if (ensuringWorktrees !== undefined) return ensuringWorktrees;
+
+    const pending = runEnsureWorktrees();
+    ensuringWorktrees = pending;
+    void pending.then(
+      () => {
+        if (ensuringWorktrees === pending) ensuringWorktrees = undefined;
+      },
+      () => {
+        if (ensuringWorktrees === pending) ensuringWorktrees = undefined;
+      },
+    );
+    return pending;
+  }
+
   // ── Public API ──────────────────────────────────────────────────────────
 
   const scheduler: Scheduler = {
@@ -675,7 +762,12 @@ export function createScheduler(opts: SchedulerOptions): Scheduler {
       // When aborted, also require that no agents are in-flight — the abort
       // handler sets complete=true but in-flight agents may still need cleanup.
       if (opts.signal?.aborted) {
-        return complete && inFlight.size === 0;
+        return (
+          complete &&
+          inFlight.size === 0 &&
+          completing.size === 0 &&
+          ensuringWorktrees === undefined
+        );
       }
       return complete;
     },

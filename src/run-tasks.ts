@@ -747,11 +747,17 @@ async function runPool(params: Record<string, unknown>, rpc: RunPoolContext) {
         // compose cursor so the task starts from scratch.
         if (task.worktreePath && task.branch) {
           await removeTaskWorktree(git, task.worktreePath, task.branch, cwd);
+          if (rpc.signal?.aborted) return;
           (audit as AuditLogger).log("worktree_deleted", { taskId: task.id, reason: "L2 restart" });
         }
         const poolHead = await git.revParseHead(pool.poolWorktree);
+        if (rpc.signal?.aborted) return;
         const slug = slugify(pool.name);
         const wt = await createTaskWorktree(git, cwd, pool.id, slug, task.id, poolHead);
+        if (rpc.signal?.aborted) {
+          await removeTaskWorktree(git, wt.path, wt.branch, cwd);
+          return;
+        }
         task.worktreePath = wt.path;
         task.branch = wt.branch;
         (audit as AuditLogger).log("worktree_created", {
@@ -774,8 +780,13 @@ async function runPool(params: Record<string, unknown>, rpc: RunPoolContext) {
         // branched from the pool's CURRENT HEAD so dependent tasks see
         // their merged parents' code.
         const poolHead = await git.revParseHead(pool.poolWorktree);
+        if (rpc.signal?.aborted) return;
         const slug = slugify(pool.name);
         const wt = await createTaskWorktree(git, cwd, pool.id, slug, task.id, poolHead);
+        if (rpc.signal?.aborted) {
+          await removeTaskWorktree(git, wt.path, wt.branch, cwd);
+          return;
+        }
         task.worktreePath = wt.path;
         task.branch = wt.branch;
         (audit as AuditLogger).log("worktree_created", {
@@ -846,8 +857,17 @@ async function runPool(params: Record<string, unknown>, rpc: RunPoolContext) {
             }
           }
           rpc.childProcesses.clear();
-          resolve(undefined);
-          return;
+          // Cancellation is terminal only after the scheduler has retired all
+          // runners. Until then their settlement is cleanup-only, and injected
+          // runners that ignore AbortSignal are force-retired after 5 seconds.
+          if (
+            scheduler.isComplete() &&
+            !mergeWorker.getInProgress() &&
+            pool.mergeQueue.length === 0
+          ) {
+            resolve(undefined);
+            return;
+          }
         }
         if (
           scheduler.isComplete() &&

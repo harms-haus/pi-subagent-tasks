@@ -11,7 +11,7 @@
  */
 
 import { existsSync, readFileSync, appendFileSync, mkdirSync } from "node:fs";
-import { dirname, join } from "node:path";
+import { dirname, join, resolve } from "node:path";
 
 import type { GitOps } from "./git-op";
 import type { PoolState } from "./types";
@@ -122,8 +122,18 @@ export async function removeTaskWorktree(
  */
 export async function ensureExcludeEntry(git: GitOps, cwd: string): Promise<void> {
   const r = await git.gitExec(["rev-parse", "--git-common-dir"], cwd);
+  if (r.code !== 0) {
+    throw new Error(`Failed to resolve Git common directory (exit code ${r.code})`);
+  }
+
   const commonDir = r.stdout.trim();
-  const excludePath = join(commonDir, "info", "exclude");
+  if (commonDir.length === 0) {
+    throw new Error("Git common directory is empty");
+  }
+
+  // Git commonly returns a path relative to the repository cwd (for example,
+  // `.git`). Absolute paths remain unchanged when passed to resolve.
+  const excludePath = join(resolve(cwd, commonDir), "info", "exclude");
 
   if (existsSync(excludePath)) {
     const content = readFileSync(excludePath, "utf-8");

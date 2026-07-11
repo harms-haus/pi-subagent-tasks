@@ -9,7 +9,7 @@
  * See §11 (agent spawning) and §12 (state persistence) of the extension spec.
  */
 
-import { readdirSync, renameSync } from "node:fs";
+import { linkSync, readdirSync, unlinkSync } from "node:fs";
 import { join } from "node:path";
 import type { Dirent } from "node:fs";
 
@@ -92,12 +92,29 @@ export function findSessionFileById(sessionDir: string, sessionId: string): stri
  * absolute path.
  *
  * The target name is `{timecode}-{slugified-label}.jsonl` (e.g.
- * `20260709T151730Z-my-task.jsonl`).
+ * `20260709T151730Z-my-task.jsonl`). Collisions receive deterministic numeric
+ * suffixes (`-2`, `-3`, ...).
+ *
+ * Creating a hard link reserves each candidate atomically without replacing an
+ * existing file. This avoids the check-then-rename race (and `rename`'s
+ * overwrite semantics) while keeping the source intact until reservation has
+ * succeeded.
  */
 export function renameSession(srcPath: string, sessionDir: string, name: string): string {
-  const target = join(sessionDir, `${timecode()}-${slugify(name)}.jsonl`);
-  renameSync(srcPath, target);
-  return target;
+  const stem = `${timecode()}-${slugify(name)}`;
+
+  for (let suffix = 1; ; suffix += 1) {
+    const target = join(sessionDir, `${stem}${suffix === 1 ? "" : `-${suffix}`}.jsonl`);
+    try {
+      linkSync(srcPath, target);
+      unlinkSync(srcPath);
+      return target;
+    } catch (error) {
+      if ((error as NodeJS.ErrnoException).code !== "EEXIST") {
+        throw error;
+      }
+    }
+  }
 }
 
 /**

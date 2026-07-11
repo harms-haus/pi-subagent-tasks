@@ -30,6 +30,9 @@ import {
 import type { GateVerdict } from "./types";
 import { toolPreview } from "./tool-format";
 
+/** Maximum number of UTF-16 characters retained from a child's stderr. */
+export const STDERR_TAIL_MAX_CHARS = 64 * 1024;
+
 // ── Public interfaces ────────────────────────────────────────────────────────
 
 /** Options for {@link spawnAgent}. */
@@ -65,7 +68,11 @@ export interface SpawnOptions {
 export interface SpawnResult {
   /** Process exit code, or `null` if force-resolved (D-state guard). */
   exitCode: number | null;
-  /** Everything the child wrote to stderr (decoded as UTF-8). */
+  /**
+   * The newest decoded UTF-8 tail written by the child to stderr, bounded by
+   * {@link STDERR_TAIL_MAX_CHARS}. Shorter output is returned unchanged and a
+   * truncation boundary never splits a UTF-16 surrogate pair.
+   */
   stderr: string;
   /** The last assistant text emitted in a `message_end` / `turn_end` event. */
   lastAssistantText: string;
@@ -202,6 +209,19 @@ function isLoopDetected(signatures: string[]): boolean {
   return signatures.every((s) => s === first);
 }
 
+/** Append decoded stderr while retaining only the newest well-formed tail. */
+function appendStderrTail(current: string, addition: string): string {
+  const combined = current + addition;
+  if (combined.length <= STDERR_TAIL_MAX_CHARS) return combined;
+
+  let tail = combined.slice(-STDERR_TAIL_MAX_CHARS);
+  const firstCodeUnit = tail.charCodeAt(0);
+  if (firstCodeUnit >= 0xdc00 && firstCodeUnit <= 0xdfff) {
+    tail = tail.slice(1);
+  }
+  return tail;
+}
+
 // ── Main entry point ─────────────────────────────────────────────────────────
 
 /**
@@ -225,13 +245,24 @@ export function spawnAgent(opts: SpawnOptions): Promise<SpawnResult> {
   let resolved = false;
   let killed = false;
   let idleInterval: ReturnType<typeof setInterval> | undefined;
+  let abortGraceTimeout: ReturnType<typeof setTimeout> | undefined;
+  let abortForceTimeout: ReturnType<typeof setTimeout> | undefined;
 
   return new Promise<SpawnResult>((resolve) => {
+    function clearLifecycleTimers(): void {
+      clearInterval(idleInterval);
+      clearTimeout(abortGraceTimeout);
+      clearTimeout(abortForceTimeout);
+      idleInterval = undefined;
+      abortGraceTimeout = undefined;
+      abortForceTimeout = undefined;
+    }
+
     // ── Safe single-resolution guard ────────────────────────────────────
     function safeResolve(result: SpawnResult): void {
       if (!resolved) {
         resolved = true;
-        clearInterval(idleInterval);
+        clearLifecycleTimers();
         // Clean up abort signal listener to prevent leaks (fix #2)
         if (opts.signal) {
           opts.signal.removeEventListener("abort", onAbort);
@@ -249,14 +280,19 @@ export function spawnAgent(opts: SpawnOptions): Promise<SpawnResult> {
       } catch {
         // PID may be stale or process already gone
       }
-      setTimeout(() => {
+      abortGraceTimeout = setTimeout(() => {
+        abortGraceTimeout = undefined;
+        if (resolved) return;
+
         try {
           kill(pid, "SIGKILL");
         } catch {
           // May already be dead or zombie
         }
+
         // Force-resolve safety guard (D-state guard, D14)
-        setTimeout(() => {
+        abortForceTimeout = setTimeout(() => {
+          abortForceTimeout = undefined;
           const durationMs = Date.now() - start;
           safeResolve({
             exitCode: null,
@@ -376,26 +412,21 @@ export function spawnAgent(opts: SpawnOptions): Promise<SpawnResult> {
       for (const line of lines) {
         const event = tryParseEvent(line);
         if (!event) continue;
+        // Only successfully parsed events count as agent activity. Raw chunks,
+        // malformed complete lines, and incomplete buffered JSON must not keep
+        // an unresponsive process alive.
+        lastActivityAt = Date.now();
         handleEvent(event);
       }
-
-      lastActivityAt = Date.now();
     }
 
     proc.stdout.on("data", onStdoutData);
 
-    // ── Stderr line buffering ────────────────────────────────────────────
+    // ── Bounded stderr capture ───────────────────────────────────────────
     const stderrDecoder = new StringDecoder("utf8");
-    let stderrBuffer = "";
 
     function onStderrData(chunk: Buffer): void {
-      stderrBuffer += stderrDecoder.write(chunk);
-      const lines = stderrBuffer.split("\n");
-      stderrBuffer = lines.pop() ?? "";
-      // Accumulate complete lines (preserve newlines)
-      for (const line of lines) {
-        stderrOutput += line + "\n";
-      }
+      stderrOutput = appendStderrTail(stderrOutput, stderrDecoder.write(chunk));
     }
 
     proc.stderr.on("data", onStderrData);
@@ -409,11 +440,8 @@ export function spawnAgent(opts: SpawnOptions): Promise<SpawnResult> {
         if (event) handleEvent(event);
       }
 
-      // Flush any partial stderr line
-      stderrBuffer += stderrDecoder.end();
-      if (stderrBuffer) {
-        stderrOutput += stderrBuffer;
-      }
+      // Flush any final UTF-8 code point buffered by the decoder.
+      stderrOutput = appendStderrTail(stderrOutput, stderrDecoder.end());
     }
 
     // Fix #1: exit → stash exit code only; close → flush & resolve

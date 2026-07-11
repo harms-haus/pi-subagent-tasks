@@ -3,9 +3,6 @@ import { defineConfig } from "vitest/config";
 export default defineConfig({
   test: {
     include: ["src/**/*.test.ts"],
-    // No tests yet during scaffolding; exit 0 so `npm run test` stays green.
-    // Becomes a no-op once real test files are added in later tasks.
-    passWithNoTests: true,
     setupFiles: ["src/__tests__/setup.ts"],
     coverage: {
       provider: "v8",

@@ -1,5 +1,35 @@
-import { describe, it, expect, afterEach } from "vitest";
-import { mkdtempSync, mkdirSync, writeFileSync, utimesSync, rmSync, existsSync } from "node:fs";
+import { describe, it, expect, afterEach, vi } from "vitest";
+
+const linkRace = vi.hoisted(() => ({
+  intercept: undefined as
+    ((source: string, target: string, performLink: () => void) => void) | undefined,
+}));
+
+vi.mock("node:fs", async (importOriginal) => {
+  const actual = await importOriginal<typeof import("node:fs")>();
+  return {
+    ...actual,
+    linkSync(source: string, target: string): void {
+      if (linkRace.intercept !== undefined) {
+        linkRace.intercept(source, target, () => {
+          actual.linkSync(source, target);
+        });
+        return;
+      }
+      actual.linkSync(source, target);
+    },
+  };
+});
+
+import {
+  mkdtempSync,
+  mkdirSync,
+  writeFileSync,
+  readFileSync,
+  utimesSync,
+  rmSync,
+  existsSync,
+} from "node:fs";
 import { join } from "node:path";
 import { tmpdir } from "node:os";
 
@@ -16,6 +46,8 @@ import type { PoolState, TaskRuntime } from "../types";
 const tmpDirs = new Set<string>();
 
 afterEach(() => {
+  vi.useRealTimers();
+  linkRace.intercept = undefined;
   for (const dir of tmpDirs) {
     rmSync(dir, { recursive: true, force: true });
   }
@@ -301,6 +333,60 @@ describe("renameSession", () => {
 
     expect(result).toMatch(new RegExp(`^${dir}/\\d{8}T\\d{6}Z-hello-world-feature-123\\.jsonl$`));
     expect(existsSync(src)).toBe(false);
+  });
+
+  it("retries an atomic target collision without overwriting the contending session", () => {
+    vi.useFakeTimers();
+    vi.setSystemTime(new Date("2026-07-09T15:17:30.000Z"));
+    const dir = makeTempDir();
+    const source = touch(join(dir, "raw-worker-a.jsonl"), "worker-a");
+    const canonical = join(dir, "20260709T151730Z-my-task.jsonl");
+    let injectedContention = false;
+
+    linkRace.intercept = (_source, target, performLink) => {
+      if (!injectedContention && target === canonical) {
+        injectedContention = true;
+        // Another worker wins after candidate selection. A hard link is an
+        // atomic no-replace operation, so the loser's real link attempt must
+        // observe EEXIST and retry rather than overwrite the winner.
+        touch(canonical, "worker-b");
+        performLink();
+        return;
+      }
+      performLink();
+    };
+
+    const result = renameSession(source, dir, "My Task");
+
+    expect(injectedContention).toBe(true);
+    expect(result).toBe(join(dir, "20260709T151730Z-my-task-2.jsonl"));
+    expect(readFileSync(canonical, "utf-8")).toBe("worker-b");
+    expect(readFileSync(result, "utf-8")).toBe("worker-a");
+    expect(existsSync(source)).toBe(false);
+  });
+
+  it("preserves every session with deterministic repeated suffixes on label/time collision", () => {
+    vi.useFakeTimers();
+    vi.setSystemTime(new Date("2026-07-09T15:17:30.000Z"));
+    const dir = makeTempDir();
+    const sources = ["raw-a.jsonl", "raw-b.jsonl", "raw-c.jsonl"].map((file, index) =>
+      touch(join(dir, file), `agent-${index + 1}`),
+    );
+
+    const results = sources.map((source) => renameSession(source, dir, "My Task"));
+
+    expect(results).toEqual([
+      join(dir, "20260709T151730Z-my-task.jsonl"),
+      join(dir, "20260709T151730Z-my-task-2.jsonl"),
+      join(dir, "20260709T151730Z-my-task-3.jsonl"),
+    ]);
+    expect(results.map((file) => existsSync(file))).toEqual([true, true, true]);
+    expect(results.map((file) => readFileSync(file, "utf-8"))).toEqual([
+      "agent-1",
+      "agent-2",
+      "agent-3",
+    ]);
+    expect(sources.map((file) => existsSync(file))).toEqual([false, false, false]);
   });
 });
 

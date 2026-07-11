@@ -398,6 +398,15 @@ describe("ref-mutating operations", () => {
     expect(exec).toHaveBeenCalledWith("git", ["worktree", "remove", "/wt/feat"]);
   });
 
+  it("worktreeRemove rejects when git fails", async () => {
+    const { gitOps, exec } = createFixture();
+    exec.mockResolvedValue({ stdout: "", stderr: "worktree is locked", code: 128, killed: false });
+
+    await expect(gitOps.worktreeRemove({ path: "/wt/feat" })).rejects.toThrow(
+      "git exited 128: worktree is locked",
+    );
+  });
+
   it("worktreeRemove passes force flags when force is true", async () => {
     const { gitOps, exec } = createFixture();
 
@@ -420,6 +429,13 @@ describe("ref-mutating operations", () => {
     await gitOps.worktreePrune();
 
     expect(exec).toHaveBeenCalledWith("git", ["worktree", "prune"]);
+  });
+
+  it("worktreePrune rejects when git fails", async () => {
+    const { gitOps, exec } = createFixture();
+    exec.mockResolvedValue({ stdout: "", stderr: "prune failed", code: 1, killed: false });
+
+    await expect(gitOps.worktreePrune()).rejects.toThrow("git exited 1: prune failed");
   });
 
   it("branchDelete uses -d without force", async () => {
@@ -446,6 +462,15 @@ describe("ref-mutating operations", () => {
     expect(exec).toHaveBeenCalledWith("git", ["branch", "-d", "old-branch"], { cwd: "/repo" });
   });
 
+  it("branchDelete rejects when git fails", async () => {
+    const { gitOps, exec } = createFixture();
+    exec.mockResolvedValue({ stdout: "", stderr: "branch not found", code: 1, killed: false });
+
+    await expect(gitOps.branchDelete({ name: "old-branch" })).rejects.toThrow(
+      "git exited 1: branch not found",
+    );
+  });
+
   it("mergeFF calls merge --ff-only with cwd", async () => {
     const { gitOps, exec } = createFixture();
 
@@ -464,6 +489,14 @@ describe("ref-mutating operations", () => {
     expect(exec).toHaveBeenCalledWith("git", ["merge", "--ff-only", "feature-branch"]);
   });
 
+  it("mergeFF preserves a non-zero result for fallback handling", async () => {
+    const { gitOps, exec } = createFixture();
+    const failure = { stdout: "", stderr: "not a fast-forward", code: 1, killed: false };
+    exec.mockResolvedValue(failure);
+
+    await expect(gitOps.mergeFF("feature-branch")).resolves.toEqual(failure);
+  });
+
   it("mergeAbort calls merge --abort", async () => {
     const { gitOps, exec } = createFixture();
 
@@ -474,10 +507,20 @@ describe("ref-mutating operations", () => {
     });
   });
 
-  it("commitAll stages then commits", async () => {
+  it("mergeAbort rejects when git fails", async () => {
     const { gitOps, exec } = createFixture();
+    exec.mockResolvedValue({ stdout: "", stderr: "no merge to abort", code: 128, killed: false });
 
-    await gitOps.commitAll("my message", "/repo");
+    await expect(gitOps.mergeAbort()).rejects.toThrow("git exited 128: no merge to abort");
+  });
+
+  it("commitAll stages then commits and returns the commit result", async () => {
+    const { gitOps, exec } = createFixture();
+    const staged = { stdout: "", stderr: "", code: 0, killed: false };
+    const committed = { stdout: "[main abc123] my message\n", stderr: "", code: 0, killed: false };
+    exec.mockResolvedValueOnce(staged).mockResolvedValueOnce(committed);
+
+    await expect(gitOps.commitAll("my message", "/repo")).resolves.toBe(committed);
 
     expect(exec).toHaveBeenNthCalledWith(1, "git", ["add", "-A"], {
       cwd: "/repo",
@@ -494,6 +537,40 @@ describe("ref-mutating operations", () => {
 
     expect(exec).toHaveBeenNthCalledWith(1, "git", ["add", "-A"]);
     expect(exec).toHaveBeenNthCalledWith(2, "git", ["commit", "-m", "quick fix"]);
+  });
+
+  it("commitAll rejects a staging failure without attempting commit", async () => {
+    const { gitOps, exec } = createFixture();
+    exec.mockResolvedValueOnce({
+      stdout: "",
+      stderr: "fatal: unable to index file",
+      code: 128,
+      killed: false,
+    });
+
+    await expect(gitOps.commitAll("my message", "/repo")).rejects.toThrow(
+      "git exited 128: fatal: unable to index file",
+    );
+
+    expect(exec).toHaveBeenCalledTimes(1);
+    expect(exec).toHaveBeenCalledWith("git", ["add", "-A"], { cwd: "/repo" });
+  });
+
+  it("commitAll rejects when commit fails", async () => {
+    const { gitOps, exec } = createFixture();
+    exec
+      .mockResolvedValueOnce({ stdout: "", stderr: "", code: 0, killed: false })
+      .mockResolvedValueOnce({
+        stdout: "",
+        stderr: "nothing to commit",
+        code: 1,
+        killed: false,
+      });
+
+    await expect(gitOps.commitAll("my message")).rejects.toThrow("git exited 1: nothing to commit");
+
+    expect(exec).toHaveBeenCalledTimes(2);
+    expect(exec).toHaveBeenNthCalledWith(2, "git", ["commit", "-m", "my message"]);
   });
 });
 

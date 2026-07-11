@@ -1573,9 +1573,49 @@ describe("scheduler core", () => {
     expect(pool.tasks[0]!.status).toBe("ready"); // never started
   });
 
-  it("does not report isComplete when agents are in-flight after abort", async () => {
-    // When the signal is aborted while agents are still running,
-    // isComplete() must return false until all in-flight agents finish.
+  it("drops queued merges on abort while waiting for the active merge to retire", () => {
+    const pool = createPool({
+      tasks: [makeTask({ id: "t1" }), makeTask({ id: "t2" })],
+    });
+    pool.mergeQueue.push("t1");
+    const abortController = new AbortController();
+    const onMergeEnqueue = vi.fn();
+    const scheduler = createScheduler({
+      pool,
+      pools: createPoolCoordinator(pool.limits),
+      sessionDir: SESSION_DIR,
+      agentRunner: {
+        runAgent: vi.fn(async () => ({
+          success: true,
+          lastText: "",
+          exitCode: 0,
+          durationMs: 0,
+        })),
+      },
+      callbacks: stubCallbacks({ onMergeEnqueue }),
+      signal: abortController.signal,
+    });
+
+    scheduler.globalSchedule();
+    expect(onMergeEnqueue).toHaveBeenCalledExactlyOnceWith("t1");
+
+    // This merge arrives while t1 is active and has not been dispatched.
+    pool.mergeQueue.push("t2");
+    abortController.abort();
+
+    expect(pool.mergeQueue).toEqual(["t1"]);
+    expect(onMergeEnqueue).not.toHaveBeenCalledWith("t2");
+
+    // Cancellation still waits for the already-active merge, whose normal
+    // completion retires the final queue entry without dispatching t2.
+    scheduler.mergeComplete("t1");
+    expect(pool.mergeQueue).toEqual([]);
+    expect(onMergeEnqueue).toHaveBeenCalledTimes(1);
+  });
+
+  it("retires a controlled in-flight agent on abort without applying its late result", async () => {
+    // Cancellation is not complete until the in-flight invocation settles, but
+    // its result is cleanup-only: it must not advance, merge, restart, or update.
     const pool = createPool({
       tasks: [makeTask({ id: "t1", status: "ready" })],
     });
@@ -1585,13 +1625,15 @@ describe("scheduler core", () => {
     // Defer t1 so we can abort while it's in-flight.
     const { runner, resolve: resolveDeferred } = createDeferredRunner(["t1"]);
 
+    const advanceCursor = vi.fn(() => ({ composeComplete: true, needsMerge: true }));
+    const onMergeEnqueue = vi.fn();
+    const onTaskRestart = vi.fn();
+    const onUpdate = vi.fn();
     const callbacks = stubCallbacks({
-      onMergeEnqueue: vi.fn((taskId: string) => {
-        const task = pool.tasks.find((t) => t.id === taskId);
-        if (task) task.status = "done";
-        const idx = pool.mergeQueue.indexOf(taskId);
-        if (idx >= 0) pool.mergeQueue.splice(idx, 1);
-      }),
+      advanceCursor,
+      onMergeEnqueue,
+      onTaskRestart,
+      onUpdate,
     });
 
     const pools = createPoolCoordinator(pool.limits);
@@ -1619,14 +1661,172 @@ describe("scheduler core", () => {
     resolveDeferred("t1");
     await flushMicrotasks();
 
-    // Now all agents have settled and isComplete() can return true.
-    // Note: onAgentFinished does NOT check abort signal — it calls
-    // globalSchedule which sets complete=true on abort, then
-    // onUpdate fires. isComplete() requires inFlight.size === 0.
+    // Settlement releases capacity exactly once, but all completion-side
+    // state mutation is inert so the persisted runtime remains resumable.
+    expect(scheduler.isComplete()).toBe(true);
+    expect(pool.tasks[0]!.status).toBe("running");
+    expect(pool.tasks[0]!.runningAgentCount).toBe(0);
+    expect(pool.mergeQueue).toEqual([]);
+    expect(pools.usage().total.used).toBe(0);
+    expect(advanceCursor).not.toHaveBeenCalled();
+    expect(onMergeEnqueue).not.toHaveBeenCalled();
+    expect(onTaskRestart).not.toHaveBeenCalled();
+    expect(onUpdate).not.toHaveBeenCalled();
+
+    // A duplicate/late completion notification cannot release capacity twice.
+    await scheduler.onAgentFinished("t1", "0", {
+      success: true,
+      lastText: "duplicate",
+      exitCode: 0,
+      durationMs: 0,
+    });
+    expect(pool.tasks[0]!.runningAgentCount).toBe(0);
+    expect(pools.usage().total.used).toBe(0);
+    expect(advanceCursor).not.toHaveBeenCalled();
+  });
+
+  it("bounds retirement of a never-settling runner and makes later settlement inert", async () => {
+    vi.useFakeTimers();
+    try {
+      const task = makeTask({ id: "t1", status: "ready" });
+      const pool = createPool({ tasks: [task] });
+      const abortController = new AbortController();
+      let settle!: (result: AgentRunResult) => void;
+      const runner: AgentRunner = {
+        runAgent: vi.fn(
+          () =>
+            new Promise<AgentRunResult>((resolve) => {
+              settle = resolve;
+            }),
+        ),
+      };
+      const advanceCursor = vi.fn(() => ({ composeComplete: true, needsMerge: true }));
+      const onUpdate = vi.fn();
+      const pools = createPoolCoordinator(pool.limits);
+      const scheduler = createScheduler({
+        pool,
+        pools,
+        sessionDir: SESSION_DIR,
+        agentRunner: runner,
+        callbacks: stubCallbacks({ advanceCursor, onUpdate }),
+        signal: abortController.signal,
+      });
+
+      scheduler.globalSchedule();
+      abortController.abort();
+      scheduler.globalSchedule();
+      expect(scheduler.isComplete()).toBe(false);
+
+      // Injected runners are given a documented bounded retirement window;
+      // they cannot prevent run_tasks from reaching terminal cancellation forever.
+      await vi.advanceTimersByTimeAsync(5_000);
+      expect(scheduler.isComplete()).toBe(true);
+      expect(task.runningAgentCount).toBe(0);
+      expect(pools.usage().total.used).toBe(0);
+
+      settle({ success: true, lastText: "too late", exitCode: 0, durationMs: 0 });
+      await Promise.resolve();
+      await Promise.resolve();
+      expect(task.status).toBe("running");
+      expect(task.runningAgentCount).toBe(0);
+      expect(pool.mergeQueue).toEqual([]);
+      expect(advanceCursor).not.toHaveBeenCalled();
+      expect(onUpdate).not.toHaveBeenCalled();
+      expect(pools.usage().total.used).toBe(0);
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
+  // ── Additional coverage: lazy worktree creation ───────────────────
+  it("creates a lazy worktree only once when ensureWorktrees calls overlap", async () => {
+    const task = makeTask({ id: "t1", status: "ready", worktreePath: null });
+    const pool = createPool({ tasks: [task] });
+    let resolveCreation!: () => void;
+    const creationPending = new Promise<void>((resolve) => {
+      resolveCreation = resolve;
+    });
+    const onEnsureWorktree = vi.fn(async (taskToEnsure: TaskRuntime) => {
+      await creationPending;
+      taskToEnsure.worktreePath = "/tmp/t1";
+      taskToEnsure.branch = "task/t1";
+    });
+    const { runner, resolve: resolveAgent } = createDeferredRunner(["t1"]);
+    const runAgent = vi.spyOn(runner, "runAgent");
+    const scheduler = createScheduler({
+      pool,
+      pools: createPoolCoordinator(pool.limits),
+      sessionDir: SESSION_DIR,
+      agentRunner: runner,
+      callbacks: {
+        ...stubCallbacks(),
+        onEnsureWorktree,
+      },
+    });
+
+    const first = scheduler.ensureWorktrees();
+    const second = scheduler.ensureWorktrees();
+
+    expect(onEnsureWorktree).toHaveBeenCalledTimes(1);
+    resolveCreation();
+    await Promise.all([first, second]);
+
+    expect(onEnsureWorktree).toHaveBeenCalledTimes(1);
+    expect(task.worktreePath).toBe("/tmp/t1");
+    expect(task.branch).toBe("task/t1");
+    expect(task.status).toBe("running");
+    expect(runAgent).toHaveBeenCalledTimes(1);
+
+    resolveAgent("t1");
+    await flushMicrotasks();
+  });
+
+  it("records one genuine failure when overlapping worktree creation calls reject", async () => {
+    const task = makeTask({ id: "t1", status: "ready", worktreePath: null });
+    const pool = createPool({ tasks: [task] });
+    let rejectCreation!: (error: Error) => void;
+    const creationPending = new Promise<void>((_resolve, reject) => {
+      rejectCreation = reject;
+    });
+    const onEnsureWorktree = vi.fn(async () => {
+      await creationPending;
+    });
+    const onAudit = vi.fn();
+    const onUpdate = vi.fn();
+    const scheduler = createScheduler({
+      pool,
+      pools: createPoolCoordinator(pool.limits),
+      sessionDir: SESSION_DIR,
+      agentRunner: createDeferredRunner([]).runner,
+      callbacks: {
+        ...stubCallbacks(),
+        getDemands: () => [],
+        onEnsureWorktree,
+        onUpdate,
+      },
+      onAudit,
+    });
+
+    const first = scheduler.ensureWorktrees();
+    const second = scheduler.ensureWorktrees();
+
+    expect(onEnsureWorktree).toHaveBeenCalledTimes(1);
+    rejectCreation(new Error("git exited 128: cannot lock ref"));
+    await Promise.all([first, second]);
+
+    expect(onEnsureWorktree).toHaveBeenCalledTimes(1);
+    expect(task.status).toBe("failed");
+    expect(task.lastError).toBe("Worktree creation failed: git exited 128: cannot lock ref");
+    expect(onAudit).toHaveBeenCalledTimes(1);
+    expect(onAudit).toHaveBeenCalledWith("task_failed", {
+      taskId: "t1",
+      reason: "worktree_creation_failed",
+      error: "git exited 128: cannot lock ref",
+    });
+    expect(onUpdate).toHaveBeenCalledTimes(2);
     expect(scheduler.isComplete()).toBe(true);
   });
 
-  // ── Additional coverage: onAgentFinished edge cases ────────────────
   it("marks a task failed when lazy worktree creation rejects", async () => {
     const task = makeTask({ id: "t1", status: "ready", worktreePath: null });
     const pool = createPool({ tasks: [task] });
