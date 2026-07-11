@@ -303,8 +303,9 @@ describe("createRealAgentRunner", () => {
     expect(mockSpawnAgent).toHaveBeenCalledOnce();
     const opts = getSpawnOpts();
     const env = opts.env as Record<string, string>;
-    // profileEnv should be present alongside process.env
+    // profileEnv should be present alongside process.env.
     expect(env.PI_API_KEY).toBe("sk-test");
+    expect(env.PI_SUBAGENT_TASK_CHILD).toBe("1");
   });
 
   // ── (e) Success mapping ────────────────────────────────────────────────

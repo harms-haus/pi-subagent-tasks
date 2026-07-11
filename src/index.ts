@@ -3,8 +3,9 @@
  *
  * @module index
  *
- * Registers the `run_tasks` and `gate_verdict` tools with the pi extension API.
- * On session_start / session_tree, seeds the merge-helper profile (idempotent).
+ * Registers `run_tasks` in the parent session and `gate_verdict` only in
+ * spawned child sessions. On session_start / session_tree, seeds the
+ * merge-helper profile (idempotent).
  * On session_shutdown, hard-kills all tracked child processes and clears the
  * tracking set so the process doesn't orphan.
  *
@@ -52,6 +53,8 @@ let gitOpsCache: ReturnType<typeof createGitOps> | undefined = undefined;
  * @param pi - The pi extension API provided by the host.
  */
 export default function (pi: ExtensionAPI): void {
+  const isChildAgent = process.env.PI_SUBAGENT_TASK_CHILD === "1";
+
   // ── Lifecycle: seed merge-helper profile ──────────────────────────────
   pi.on("session_start", () => {
     try {
@@ -84,7 +87,13 @@ export default function (pi: ExtensionAPI): void {
   });
 
   // ── Register tools ─────────────────────────────────────────────────────
-  registerGateVerdictTool(pi);
+  // The verdict protocol belongs only to reviewers running in child agents.
+  // Keeping it out of the parent tool registry prevents the main agent from
+  // accidentally calling gate_verdict for its own work.
+  if (isChildAgent) {
+    registerGateVerdictTool(pi);
+    return;
+  }
 
   pi.registerTool(
     createRunTasksTool(pi, {

@@ -2,7 +2,7 @@
  * Tests for the factory entry point (src/index.ts).
  *
  * Verifies:
- *   1. The factory registers exactly 2 tools (run_tasks + gate_verdict).
+ *   1. The parent factory registers run_tasks; child factories register gate_verdict.
  *   2. session_shutdown handler kills child processes and clears the set.
  *   3. session_start / session_tree call seedMergeHelperProfile.
  *   4. No top-level side effects — importing the module doesn't register
@@ -12,7 +12,7 @@
  * @module
  */
 
-import { describe, it, expect, vi, beforeEach } from "vitest";
+import { describe, it, expect, vi, beforeEach, afterEach } from "vitest";
 import { createMockAPI } from "./helpers/mock-api";
 
 // ── Module-level mocks (hoisted) ──────────────────────────────────────────
@@ -54,17 +54,33 @@ import { createRunTasksTool } from "../run-tasks";
 describe("factory (default export)", () => {
   beforeEach(() => {
     vi.clearAllMocks();
+    delete process.env.PI_SUBAGENT_TASK_CHILD;
+  });
+
+  afterEach(() => {
+    delete process.env.PI_SUBAGENT_TASK_CHILD;
   });
 
   // ── Test 1: tool registration ─────────────────────────────────────────
 
-  it("registers exactly 2 tools (run_tasks + gate_verdict)", () => {
+  it("registers run_tasks in the parent session", () => {
     const { api, capturedTools } = createMockAPI();
 
     factory(api);
 
-    expect(capturedTools.size).toBe(2);
+    expect(capturedTools.size).toBe(1);
     expect(capturedTools.has("run_tasks")).toBe(true);
+    expect(capturedTools.has("gate_verdict")).toBe(false);
+  });
+
+  it("registers only gate_verdict in a child session", () => {
+    process.env.PI_SUBAGENT_TASK_CHILD = "1";
+    const { api, capturedTools } = createMockAPI();
+
+    factory(api);
+
+    expect(capturedTools.size).toBe(1);
+    expect(capturedTools.has("run_tasks")).toBe(false);
     expect(capturedTools.has("gate_verdict")).toBe(true);
   });
 
@@ -203,7 +219,7 @@ describe("factory (default export)", () => {
 
     // First call.
     factory(api);
-    expect(capturedTools.size).toBe(2);
+    expect(capturedTools.size).toBe(1);
 
     // Second call — must not throw and must not duplicate registration.
     expect(() => {
@@ -211,9 +227,9 @@ describe("factory (default export)", () => {
     }).not.toThrow();
 
     // The pi.registerTool mock just overwrites previous entries; size
-    // stays 2 because vi.fn doesn't throw on duplicate registration.
-    expect(capturedTools.size).toBe(2);
+    // stays 1 because vi.fn doesn't throw on duplicate registration.
+    expect(capturedTools.size).toBe(1);
     expect(capturedTools.has("run_tasks")).toBe(true);
-    expect(capturedTools.has("gate_verdict")).toBe(true);
+    expect(capturedTools.has("gate_verdict")).toBe(false);
   });
 });

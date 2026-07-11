@@ -192,7 +192,13 @@ export function createRealAgentRunner(opts: RealAgentRunnerOptions): AgentRunner
       const result = await spawnAgent({
         command,
         args: commandArgs,
-        env: { ...(process.env as Record<string, string>), ...profileEnv },
+        env: {
+          ...(process.env as Record<string, string>),
+          ...profileEnv,
+          // The extension entrypoint uses this marker to register only the
+          // child-only gate_verdict tool, keeping it out of the parent agent.
+          PI_SUBAGENT_TASK_CHILD: "1",
+        },
         stdinPrompt: demand.effectivePrompt,
         cwd: demand.cwd,
         signal: runOpts.signal,
