@@ -177,6 +177,7 @@ export async function reconcileForResume(
       task.cursor = buildCursor(task.compose, "0");
       task.sessionFiles = [];
       task.outputLines = [];
+      task.toolCallCount = 0;
       task.lastError = undefined;
     }
 

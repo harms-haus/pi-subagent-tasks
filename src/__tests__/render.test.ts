@@ -271,7 +271,7 @@ describe("renderBoard", () => {
     const textChildren = container.children.filter((c): c is Text => c instanceof Text);
     const row = textChildren.find((t) => textContent(t).includes("t-retry"));
     expect(row).toBeDefined();
-    expect(textContent(row!)).toContain("(retry 2)");
+    expect(textContent(row!)).toContain("retry 2");
     expect(textContent(row!)).toContain("1m");
   });
 

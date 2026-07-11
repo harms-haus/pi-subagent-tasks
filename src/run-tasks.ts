@@ -198,6 +198,7 @@ function specToTaskRuntime(
     lastError: undefined,
     startedAt: undefined,
     outputLines: [],
+    toolCallCount: 0,
   };
 }
 

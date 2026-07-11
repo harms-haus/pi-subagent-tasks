@@ -310,6 +310,7 @@ export function createScheduler(opts: SchedulerOptions): Scheduler {
             const lines = text.split(/\r?\n/).filter((line) => line.trim().length > 0);
             if (lines.length === 0) return;
             liveTask.outputLines = [...(liveTask.outputLines ?? []), ...lines].slice(-10);
+            liveTask.toolCallCount = (liveTask.toolCallCount ?? 0) + lines.length;
             opts.callbacks.onUpdate();
           },
         })
@@ -413,6 +414,9 @@ export function createScheduler(opts: SchedulerOptions): Scheduler {
       if (action === "task-restart") {
         task.status = "ready";
         task.retryCount++;
+        // Reset live-window state for the fresh whole-task attempt.
+        task.outputLines = [];
+        task.toolCallCount = 0;
         // Reset the elapsed timer for the fresh attempt (N3). It will be
         // re-stamped when the task next transitions to "running".
         task.startedAt = undefined;

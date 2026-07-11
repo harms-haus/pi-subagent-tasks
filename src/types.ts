@@ -198,8 +198,10 @@ export interface TaskRuntime {
   lastError?: string;
   /** Epoch ms when the task first started running. */
   startedAt?: number;
-  /** Rolling latest assistant-output lines shown in the live board. */
+  /** Rolling latest compact tool-call lines shown in the live board. */
   outputLines?: string[];
+  /** Number of tool calls observed in the current whole-task attempt. */
+  toolCallCount?: number;
 }
 
 // ── Concurrency-pool usage (§7) ──────────────────────────────────────────────

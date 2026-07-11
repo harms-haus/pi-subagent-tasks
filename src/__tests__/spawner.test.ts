@@ -528,8 +528,9 @@ describe("spawnAgent", () => {
     ]);
 
     await promise;
-    expect(onOutput).toHaveBeenCalledWith("Checking");
-    expect(onOutput).toHaveBeenCalledWith("📖 read → /tmp/test/file.ts +10");
+    expect(onOutput).not.toHaveBeenCalledWith("Checking");
+    expect(onOutput).toHaveBeenCalledTimes(1);
+    expect(onOutput).toHaveBeenCalledWith("📖 read -> /tmp/test/file.ts +10");
   });
 
   it("calls onUpdate for each parsed JSON event", async () => {

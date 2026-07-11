@@ -19,7 +19,8 @@ const EMOJI: Record<string, string> = {
 function shortPath(value: unknown, cwd: string): string {
   if (typeof value !== "string" || value.length === 0) return "...";
   if (value === cwd) return ".";
-  return value.startsWith(`${cwd}/`) ? value.slice(cwd.length + 1) : value;
+  if (value.startsWith(`${cwd}/`)) return `./${value.slice(cwd.length + 1)}`;
+  return value;
 }
 
 function text(value: unknown, fallback = "..."): string {
@@ -37,11 +38,11 @@ export function formatToolCall(
   const path = shortPath(args.path ?? args.filePath, cwd);
   switch (toolName) {
     case "read":
-      return `read → ${path}${args.offset ? `:${text(args.offset)}` : ""}${args.limit ? ` +${text(args.limit)}` : ""}`;
+      return `read -> ${path}${args.offset ? `:${text(args.offset)}` : ""}${args.limit ? ` +${text(args.limit)}` : ""}`;
     case "write": {
       const content = text(args.content, "");
       const lines = content ? content.split(/\r?\n/).filter((line) => line.trim()).length : 0;
-      return `write → ${path} +${lines}`;
+      return `write -> ${path} +${lines}`;
     }
     case "edit": {
       const edits = Array.isArray(args.edits) ? args.edits : [];
@@ -57,24 +58,24 @@ export function formatToolCall(
           .split(/\r?\n/)
           .filter((line) => line.trim()).length;
       }
-      return `edit → ${path} +${added}/-${removed}`;
+      return `edit -> ${path} +${added}/-${removed}`;
     }
     case "bash":
-      return `bash → ${text(args.command).split(/\r?\n/, 1)[0]}`;
+      return `bash -> ${text(args.command).split(/\r?\n/, 1)[0]}`;
     case "grep":
-      return `grep → /${text(args.pattern)}/${args.path ? ` → ${shortPath(args.path, cwd)}` : ""}`;
+      return `grep -> /${text(args.pattern)}/${args.path ? ` -> ${shortPath(args.path, cwd)}` : ""}`;
     case "find":
-      return `find → ${text(args.pattern)}${args.path ? ` in ${shortPath(args.path, cwd)}` : ""}`;
+      return `find -> ${text(args.pattern)}${args.path ? ` in ${shortPath(args.path, cwd)}` : ""}`;
     case "ls":
-      return `ls → ${shortPath(args.path, cwd) === "..." ? "." : shortPath(args.path, cwd)}`;
+      return `ls -> ${shortPath(args.path, cwd) === "..." ? "." : shortPath(args.path, cwd)}`;
     case "web_search":
-      return `web_search → "${text(args.q ?? args.query)}"`;
+      return `web_search -> "${text(args.q ?? args.query)}"`;
     case "write_todos":
-      return `write_todos → ${Array.isArray(args.todos) ? args.todos.length : 0} todos written`;
+      return `write_todos -> ${Array.isArray(args.todos) ? args.todos.length : 0} todos written`;
     case "edit_todos":
-      return `edit_todos → ${text(args.action, "?")}`;
+      return `edit_todos -> ${text(args.action, "?")}`;
     case "workflow_step":
-      return `workflow_step → ${text(args.action, "?")}`;
+      return `workflow_step -> ${text(args.action, "?")}`;
     default: {
       const serialized = JSON.stringify(args);
       return serialized === "{}" ? toolName : `${toolName} ${serialized}`;

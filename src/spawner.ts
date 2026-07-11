@@ -283,14 +283,14 @@ export function spawnAgent(opts: SpawnOptions): Promise<SpawnResult> {
         }
       }
 
-      // 1. message_end is the canonical assistant-output event. Tool calls
-      // are embedded in message.content as `toolCall` parts (pi-subagents uses
-      // this shape too), rather than being sourced from execution events.
+      // 1. message_end is the canonical assistant-output event. Preserve its
+      // text for downstream flow, but keep the live window tool-call-only.
+      // Tool results and assistant prose make the rolling display noisy; like
+      // pi-subagents, only compact `toolCall` previews are emitted to onOutput.
       if (event.type === "message_end") {
         const text = extractLastText(event);
         if (text !== undefined) {
           lastAssistantText = text;
-          opts.onOutput?.(text);
         }
         emitMessageToolCalls(event, opts);
       } else if (event.type === "turn_end") {
@@ -298,7 +298,6 @@ export function spawnAgent(opts: SpawnOptions): Promise<SpawnResult> {
         const text = extractLastText(event);
         if (text !== undefined && text !== lastAssistantText) {
           lastAssistantText = text;
-          opts.onOutput?.(text);
         }
       }
 

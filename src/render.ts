@@ -76,6 +76,19 @@ function countAgentLeaves(node: CursorNode): AgentLeafCount {
   return { done, total };
 }
 
+/** Collect the distinct profiles of agent leaves that are currently running. */
+function runningProfiles(node: CursorNode, profiles = new Set<string>()): Set<string> {
+  if (node.kind === "agent") {
+    if (node.state === "running" && node.profile) profiles.add(node.profile);
+    return profiles;
+  }
+  for (const child of node.children ?? []) runningProfiles(child, profiles);
+  if (node.workCursor) runningProfiles(node.workCursor, profiles);
+  if (node.reviewCursor) runningProfiles(node.reviewCursor, profiles);
+  if (node.childCursor) runningProfiles(node.childCursor, profiles);
+  return profiles;
+}
+
 // ── Board renderer (§13) ───────────────────────────────────────────────────
 
 /** Human-readable label for each status tier. */
@@ -142,11 +155,20 @@ export function renderBoard(
       const icon = STATUS_ICONS[task.status];
       const displayName = task.title ?? task.id;
       const { done, total } = countAgentLeaves(task.cursor);
-      const retryStr = task.retryCount > 0 ? ` (retry ${task.retryCount})` : "";
-
-      let elapsedStr = "";
+      const headerParts = [`[${done}/${total}]`];
+      const profiles = [...runningProfiles(task.cursor)];
+      if (profiles.length > 0) headerParts.push(profiles.join(", "));
+      if (task.runningAgentCount > 0) {
+        headerParts.push(
+          `${task.runningAgentCount} agent${task.runningAgentCount === 1 ? "" : "s"}`,
+        );
+      }
+      if ((task.toolCallCount ?? 0) > 0) {
+        headerParts.push(`${task.toolCallCount} tools`);
+      }
+      if (task.retryCount > 0) headerParts.push(`retry ${task.retryCount}`);
       if (task.startedAt !== undefined) {
-        elapsedStr = ` ${formatElapsed(Date.now() - task.startedAt)}`;
+        headerParts.push(formatElapsed(Date.now() - task.startedAt));
       }
 
       let errorStr = "";
@@ -155,7 +177,8 @@ export function renderBoard(
       }
 
       const token = TIER_TOKENS[task.status];
-      const row = `${theme.fg(token, icon)} ${displayName} [${done}/${total}]${retryStr}${elapsedStr}${errorStr}`;
+      const details = theme.fg("dim", ` • ${headerParts.join(" • ")}`);
+      const row = `${theme.fg(token, icon)} ${theme.fg("accent", theme.bold(displayName))}${details}${errorStr}`;
       container.addChild(new Text(row, 0, 0));
       rowCount++;
       displayedTasks++;
