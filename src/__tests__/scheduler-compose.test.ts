@@ -974,5 +974,7 @@ describe("compose scheduler integration", () => {
     expect(task.sessionFiles).toContain("/sessions/0.0.jsonl");
     expect(task.sessionFiles).toContain("/sessions/0.1.jsonl");
     expect(task.sessionFiles).toHaveLength(2);
+    expect(task.responseHistory?.map((entry) => entry.lastText)).toEqual(["out-0.0", "out-0.1"]);
+    expect(task.responseHistory?.map((entry) => entry.atomPath)).toEqual(["0.0", "0.1"]);
   });
 });

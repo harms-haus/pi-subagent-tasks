@@ -4,8 +4,9 @@ Autonomous multi-task pool orchestrator for the pi-coding-agent — define a poo
 
 ## What it does
 
-`pi-subagent-tasks` is a single pi-coding-agent extension that exposes **one tool** —
-`run_tasks`. Calling it is a **blocking operation**: you hand it a pool of
+`pi-subagent-tasks` is a pi-coding-agent extension that exposes `run_tasks` plus
+`get_task_history` for inspecting completed agent responses. Calling `run_tasks`
+is a **blocking operation**: you hand it a pool of
 ordered, dependent tasks, and the extension autonomously drives the entire pool
 to completion before returning a summary. Internally it:
 
@@ -94,7 +95,7 @@ this mode for read-only work or deliberately disjoint outputs.
 `name` is slugified (kebab-case) into the **pool id**, the git branch
 (`pi-subagent-task/<slug>`), and the on-disk directory. The tool blocks until the
 pool reaches a fixed point (all tasks done or failed), streaming the live board
-throughout. When it finishes it returns a summary with branch paths and session
+throughout. When it finishes it returns a summary with task ids, branch paths, and session
 locations so you can finalize with plain `git`.
 
 To resume an existing pool (e.g. after an abort or to retry failed tasks):
@@ -268,9 +269,9 @@ The extension is organized into domain-focused modules under `src/`:
 
 | Domain            | Modules                                                                                               | Responsibility                                                                                                                                            |
 | ----------------- | ----------------------------------------------------------------------------------------------------- | --------------------------------------------------------------------------------------------------------------------------------------------------------- |
-| Entry & lifecycle | `index.ts`                                                                                            | Factory registering `run_tasks` + `gate_verdict`; seeds `merge-helper`; hard-kills children on `session_shutdown`.                                        |
+| Entry & lifecycle | `index.ts`                                                                                            | Factory registering parent orchestration/history tools or child `gate_verdict`; seeds `merge-helper`; hard-kills children on shutdown.                    |
 | Types & constants | `types.ts`, `constants.ts`                                                                            | Domain model (statuses, limits, compose IR, cursor, audit events) and tunable defaults.                                                                   |
-| Tool surface      | `run-tasks.ts`, `gate-verdict.ts`                                                                     | The `run_tasks` tool (create/resume/abort paths, live-board loop) and the terminating `gate_verdict` tool.                                                |
+| Tool surface      | `run-tasks.ts`, `task-history.ts`, `gate-verdict.ts`                                                  | Pool execution, ordered task response/session-history retrieval, and the terminating reviewer verdict tool.                                               |
 | Scheduler         | `scheduler.ts`, `atoms.ts`, `cursor.ts`, `status.ts`, `dag.ts`, `gateloop.ts`, `retry.ts`, `pools.ts` | Dependency scheduling, compose-cursor advancement, status recompute, DAG resolution, gateLoop verdicts, two-level retry, and concurrency-pool accounting. |
 | Agent execution   | `agent-runner.ts`, `spawner.ts`, `profiles.ts`, `sessions.ts`                                         | Profile resolution, subprocess spawning, JSON-event parsing, and session-file move/rename for resume.                                                     |
 | Git & worktrees   | `git-op.ts`, `worktrees.ts`, `merge.ts`                                                               | Pool/task worktree creation, serial merge queue, and merge-helper conflict resolution.                                                                    |

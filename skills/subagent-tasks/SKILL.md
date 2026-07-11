@@ -10,9 +10,10 @@ description: >-
 # pi-subagent-tasks — `run_tasks` Skill
 
 This skill teaches how to use **pi-subagent-tasks**, a pi-coding-agent extension
-that provides one tool (`run_tasks`) for defining and autonomously orchestrating
-a pool of dependent tasks. Tasks run in isolated git worktrees, merge serially
-back into a shared pool branch, and are subject to multi-dimensional concurrency
+that provides `run_tasks` for orchestrating a pool of dependent tasks and
+`get_task_history` for retrieving their agent responses. Tasks run in isolated
+Git worktrees, merge serially back into a shared pool branch, and are subject to
+multi-dimensional concurrency
 limits. A live streaming board (Ctrl+O to expand) shows real-time progress.
 
 Read this entire file before using `run_tasks`.
@@ -481,8 +482,13 @@ so you know the merge target.
 
 ### Inspecting a pool
 
-Since `run_tasks` is the only tool, inspect pools with the pi `read` tool
-(not a shell builtin — use it as a pi tool invocation):
+Use `get_task_history({ "poolId": "<pool>", "taskId": "<task>" })` to get every
+agent execution's final response in completion order, including retries and
+rejected gate-loop iterations. Pass `"fullSessionData": true` only when the
+final responses are insufficient; it includes every JSONL entry from each
+session used by the task and can be large.
+
+For raw pool state and logs, use the pi `read` tool (not a shell builtin):
 
 - Read the pool summary: `read .pi/subagent-tasks/<id>/state.json`
 - Read the event log: `read .pi/subagent-tasks/<id>/audit.jsonl`
@@ -499,6 +505,7 @@ returns a plain-text summary:
 Pool: release-feature  (id: release-feature)
 Pool branch: pi-subagent-task/release-feature   (worktree: .pi/subagent-tasks/release-feature/worktrees/pool)
 Tasks: 3 done, 1 failed, 1 skipped
+Task IDs: plan, tests, code, docs, deploy
   ✓ plan        (session: …/sessions/…-plan.jsonl)
   ✓ tests       (session: …/sessions/…-tests.jsonl)
   ✓ code        (session: …/sessions/…-code.jsonl)

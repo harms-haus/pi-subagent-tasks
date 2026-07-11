@@ -20,6 +20,7 @@ import { fileURLToPath } from "node:url";
 import kill from "tree-kill";
 import { registerGateVerdictTool } from "./gate-verdict";
 import { createRunTasksTool } from "./run-tasks";
+import { createTaskHistoryTool } from "./task-history";
 import { createRealAgentRunner } from "./agent-runner";
 import { createGitOps } from "./git-op";
 import { seedMergeHelperProfile } from "./profiles";
@@ -107,4 +108,5 @@ export default function (pi: ExtensionAPI): void {
       childProcesses,
     }),
   );
+  pi.registerTool(createTaskHistoryTool(pi));
 }

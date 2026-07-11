@@ -63,13 +63,14 @@ describe("factory (default export)", () => {
 
   // ── Test 1: tool registration ─────────────────────────────────────────
 
-  it("registers run_tasks in the parent session", () => {
+  it("registers parent tools", () => {
     const { api, capturedTools } = createMockAPI();
 
     factory(api);
 
-    expect(capturedTools.size).toBe(1);
+    expect(capturedTools.size).toBe(2);
     expect(capturedTools.has("run_tasks")).toBe(true);
+    expect(capturedTools.has("get_task_history")).toBe(true);
     expect(capturedTools.has("gate_verdict")).toBe(false);
   });
 
@@ -219,17 +220,17 @@ describe("factory (default export)", () => {
 
     // First call.
     factory(api);
-    expect(capturedTools.size).toBe(1);
+    expect(capturedTools.size).toBe(2);
 
     // Second call — must not throw and must not duplicate registration.
     expect(() => {
       factory(api);
     }).not.toThrow();
 
-    // The pi.registerTool mock just overwrites previous entries; size
-    // stays 1 because vi.fn doesn't throw on duplicate registration.
-    expect(capturedTools.size).toBe(1);
+    // The pi.registerTool mock overwrites previous entries.
+    expect(capturedTools.size).toBe(2);
     expect(capturedTools.has("run_tasks")).toBe(true);
+    expect(capturedTools.has("get_task_history")).toBe(true);
     expect(capturedTools.has("gate_verdict")).toBe(false);
   });
 });

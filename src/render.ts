@@ -292,6 +292,7 @@ export function renderSummary(pool: PoolState): {
   lines.push(
     `Tasks: ${doneTasks.length} done, ${failedTasks.length} failed, ${skippedTasks.length} skipped`,
   );
+  lines.push(`Task IDs: ${pool.tasks.map((task) => task.id).join(", ")}`);
 
   // ── Per-task lines in creation order ──
   for (const t of pool.tasks) {
@@ -332,6 +333,7 @@ export function renderSummary(pool: PoolState): {
     content: [{ type: "text", text: lines.join("\n") }],
     details: {
       poolId: pool.id,
+      taskIds: pool.tasks.map((task) => task.id),
       counts: {
         done: doneTasks.length,
         failed: failedTasks.length,

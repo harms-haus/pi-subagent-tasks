@@ -192,6 +192,8 @@ export interface TaskRuntime {
   branch: string | null;
   /** All flat session files produced for this task. */
   sessionFiles: string[];
+  /** Agent responses in completion order, including retries and gate-loop iterations. */
+  responseHistory?: TaskResponseHistoryEntry[];
   /** Transitive count of tasks depending on this one (priority, §7.3). */
   downstreamCount: number;
   /** Last error line (shown for failed tasks on the board). */
@@ -202,6 +204,16 @@ export interface TaskRuntime {
   outputLines?: string[];
   /** Number of tool calls observed in the current whole-task attempt. */
   toolCallCount?: number;
+}
+
+/** One completed agent execution retained for task-history inspection. */
+export interface TaskResponseHistoryEntry {
+  atomPath: string;
+  lastText: string;
+  success: boolean;
+  completedAt: number;
+  sessionFile?: string;
+  error?: string;
 }
 
 // ── Concurrency-pool usage (§7) ──────────────────────────────────────────────

@@ -361,6 +361,19 @@ export function createScheduler(opts: SchedulerOptions): Scheduler {
     // Release pool slots and decrement running agent count.
     releaseAgent(taskId, atomPath);
 
+    // Retain every completed execution in completion order. This includes
+    // failures, soft retries, gate-loop rejections, and whole-task retries.
+    // Unlike sessionFiles, this history is intentionally never reset.
+    task.responseHistory ??= [];
+    task.responseHistory.push({
+      atomPath,
+      lastText: result.lastText,
+      success: result.success,
+      completedAt: Date.now(),
+      sessionFile: result.sessionFile,
+      error: result.error,
+    });
+
     // Emit agent lifecycle events (H3).
     if (result.success) {
       opts.onAudit?.("agent_complete", {

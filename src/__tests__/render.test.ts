@@ -388,28 +388,29 @@ describe("renderSummary", () => {
     expect(lines[0]).toBe("Pool: My Pool  (id: my-pool)");
     expect(lines[1]).toMatch(/^Pool branch: pi-subagent-task\/my-pool {3}\(worktree: /);
     expect(lines[2]).toBe("Tasks: 2 done, 1 failed, 1 skipped");
+    expect(lines[3]).toBe("Task IDs: t-setup, t-lint, t-build, t-deploy");
 
     // Done tasks.
-    expect(lines[3]).toBe("  ✓ t-setup Setup  (session: session-setup.jsonl)");
-    expect(lines[4]).toBe("  ✓ t-lint  (session: -)");
+    expect(lines[4]).toBe("  ✓ t-setup Setup  (session: session-setup.jsonl)");
+    expect(lines[5]).toBe("  ✓ t-lint  (session: -)");
 
     // Failed task.
-    expect(lines[5]).toBe(
+    expect(lines[6]).toBe(
       "  ✗ t-build  FAILED after 3 attempts — compilation error  (resume to retry)",
     );
 
     // Skipped task.
-    expect(lines[6]).toBe("  ⊘ t-deploy  SKIPPED (depends on failed: t-build)");
+    expect(lines[7]).toBe("  ⊘ t-deploy  SKIPPED (depends on failed: t-build)");
 
     // Paths.
-    expect(lines[7]).toBe("Sessions: .pi/subagent-tasks/my-pool/sessions/");
-    expect(lines[8]).toBe("Audit:    .pi/subagent-tasks/my-pool/audit.jsonl");
+    expect(lines[8]).toBe("Sessions: .pi/subagent-tasks/my-pool/sessions/");
+    expect(lines[9]).toBe("Audit:    .pi/subagent-tasks/my-pool/audit.jsonl");
 
     // Finalize.
-    expect(lines[9]).toBe(
+    expect(lines[10]).toBe(
       "Finalize: from your repo, e.g.  git merge --ff-only pi-subagent-task/my-pool",
     );
-    expect(lines[10]).toBe(
+    expect(lines[11]).toBe(
       "                              | gh pr create --head pi-subagent-task/my-pool",
     );
   });
@@ -424,6 +425,7 @@ describe("renderSummary", () => {
     expect(text).toContain("Tasks: 2 done, 0 failed, 0 skipped");
     expect(result.details).toEqual({
       poolId: "test-pool",
+      taskIds: ["t-1", "t-2"],
       counts: { done: 2, failed: 0, skipped: 0 },
     });
   });
@@ -439,6 +441,7 @@ describe("renderSummary", () => {
     expect(text).toContain("Tasks: 0 done, 1 failed, 2 skipped");
     expect(result.details).toEqual({
       poolId: "test-pool",
+      taskIds: ["t-fail", "t-fail2", "t-real"],
       counts: { done: 0, failed: 1, skipped: 2 },
     });
   });
