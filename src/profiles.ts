@@ -8,7 +8,7 @@
  *
  * Profiles are stored as Markdown files with YAML frontmatter in:
  *   - Global: `<agentDir>/profiles/*.md`
- *   - Project: `<cwd>/.pi/profiles/*.md`  (overrides global same-name)
+ *   - Project: `<cwd>/.pi/agent/profiles/*.md` (overrides global same-name)
  *
  * The module exposes a 5-second TTL cache keyed by `cwd` for the merged
  * profile map.
@@ -294,20 +294,19 @@ function mergeProfiles(
  * Load all profiles from global and project directories.
  *
  * Global profiles come from `<agentDir>/profiles/*.md`.
- * Project profiles come from `<cwd>/.pi/profiles/*.md` and override global
- * profiles with the same name.
+ * Project profiles come from `<cwd>/.pi/agent/profiles/*.md` and override
+ * global profiles.
  *
- * Results are cached for 5 seconds keyed by `cwd`. Callers that know the
- * on-disk files have changed should force a re-read by waiting for TTL expiry
- * (or, in future, calling an explicit `invalidateProfileCache`).
+ * Results are cached for 5 seconds keyed by `cwd` unless `refresh` is true.
  *
  * @param cwd - The working directory for resolving project profiles.
+ * @param refresh - Ignore the cache and read all profile directories now.
  * @returns A map of profile name → Profile.
  */
-export function loadProfiles(cwd: string): Map<string, Profile> {
+export function loadProfiles(cwd: string, refresh = false): Map<string, Profile> {
   const now = Date.now();
   const cached = profileCache.get(cwd);
-  if (cached && now - cached.timestamp < TTL_MS) {
+  if (!refresh && cached && now - cached.timestamp < TTL_MS) {
     return cached.profiles;
   }
 

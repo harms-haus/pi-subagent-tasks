@@ -129,8 +129,8 @@ describe("profiles directories", () => {
     expect(getGlobalProfilesDir()).toBe("/custom/agent/profiles");
   });
 
-  it("project profiles dir is <cwd>/.pi/profiles", () => {
-    expect(getProjectProfilesDir("/repo")).toBe(join("/repo", ".pi", "profiles"));
+  it("project profiles dir is <cwd>/.pi/agent/profiles", () => {
+    expect(getProjectProfilesDir("/repo")).toBe(join("/repo", ".pi", "agent", "profiles"));
   });
 });
 

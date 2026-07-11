@@ -21,6 +21,7 @@ import kill from "tree-kill";
 import { registerGateVerdictTool } from "./gate-verdict";
 import { createRunTasksTool } from "./run-tasks";
 import { createTaskHistoryTool } from "./task-history";
+import { createTaskProfileListTool } from "./profile-list";
 import { createRealAgentRunner } from "./agent-runner";
 import { createGitOps } from "./git-op";
 import { seedMergeHelperProfile } from "./profiles";
@@ -109,4 +110,5 @@ export default function (pi: ExtensionAPI): void {
     }),
   );
   pi.registerTool(createTaskHistoryTool(pi));
+  pi.registerTool(createTaskProfileListTool(pi));
 }

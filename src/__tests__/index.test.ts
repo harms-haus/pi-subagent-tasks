@@ -63,14 +63,16 @@ describe("factory (default export)", () => {
 
   // ── Test 1: tool registration ─────────────────────────────────────────
 
-  it("registers parent tools", () => {
+  it("registers parent tools without colliding with subagent profiles", () => {
     const { api, capturedTools } = createMockAPI();
 
     factory(api);
 
-    expect(capturedTools.size).toBe(2);
+    expect(capturedTools.size).toBe(3);
     expect(capturedTools.has("run_tasks")).toBe(true);
     expect(capturedTools.has("get_task_history")).toBe(true);
+    expect(capturedTools.has("list_task_profiles")).toBe(true);
+    expect(capturedTools.has("list_subagent_profiles")).toBe(false);
     expect(capturedTools.has("gate_verdict")).toBe(false);
   });
 
@@ -220,7 +222,7 @@ describe("factory (default export)", () => {
 
     // First call.
     factory(api);
-    expect(capturedTools.size).toBe(2);
+    expect(capturedTools.size).toBe(3);
 
     // Second call — must not throw and must not duplicate registration.
     expect(() => {
@@ -228,9 +230,10 @@ describe("factory (default export)", () => {
     }).not.toThrow();
 
     // The pi.registerTool mock overwrites previous entries.
-    expect(capturedTools.size).toBe(2);
+    expect(capturedTools.size).toBe(3);
     expect(capturedTools.has("run_tasks")).toBe(true);
     expect(capturedTools.has("get_task_history")).toBe(true);
+    expect(capturedTools.has("list_task_profiles")).toBe(true);
     expect(capturedTools.has("gate_verdict")).toBe(false);
   });
 });

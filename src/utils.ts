@@ -74,11 +74,9 @@ export function getGlobalProfilesDir(): string {
   return join(getAgentDir(), "profiles");
 }
 
-/**
- * Project profiles directory (overrides global): `<cwd>/.pi/profiles` (D4).
- */
+/** Project profiles directory (overrides global): `<cwd>/.pi/agent/profiles`. */
 export function getProjectProfilesDir(cwd: string): string {
-  return join(cwd, ".pi", "profiles");
+  return join(cwd, ".pi", "agent", "profiles");
 }
 
 /**

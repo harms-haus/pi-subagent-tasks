@@ -4,8 +4,8 @@ Autonomous multi-task pool orchestrator for the pi-coding-agent — define a poo
 
 ## What it does
 
-`pi-subagent-tasks` is a pi-coding-agent extension that exposes `run_tasks` plus
-`get_task_history` for inspecting completed agent responses. Calling `run_tasks`
+`pi-subagent-tasks` exposes `run_tasks`, `get_task_history`, and the uniquely
+named `list_task_profiles` profile-discovery tool. Calling `run_tasks`
 is a **blocking operation**: you hand it a pool of
 ordered, dependent tasks, and the extension autonomously drives the entire pool
 to completion before returning a summary. Internally it:
@@ -216,10 +216,10 @@ model, system-prompt, tools, and other settings for spawned agents. They live in
 **new directories, separate from the `agent-profiles/` dirs used by other pi
 extensions**:
 
-| Scope   | Directory                                    |
-| ------- | -------------------------------------------- |
-| Global  | `~/.pi/agent/profiles/`                      |
-| Project | `.pi/profiles/` (overrides global same-name) |
+| Scope   | Directory                                          |
+| ------- | -------------------------------------------------- |
+| Global  | `~/.pi/agent/profiles/`                            |
+| Project | `.pi/agent/profiles/` (overrides global same-name) |
 
 The extension seeds one profile automatically on first run (never overwriting an
 existing file): **`merge-helper`** for resolving merge conflicts. All other
@@ -228,7 +228,7 @@ profiles (workers, reviewers, planners) you create yourself.
 > **Note:** The auto-seeded `merge-helper` profile has no `provider` or `model`
 > set — you must add them before a merge conflict can be resolved. Edit
 > `~/.pi/agent/profiles/merge-helper.md` (global) or create
-> `.pi/profiles/merge-helper.md` (project override) with your preferred
+> `.pi/agent/profiles/merge-helper.md` (project override) with your preferred
 > provider and model.
 
 ```markdown
@@ -243,10 +243,10 @@ You are a thorough code reviewer. Review the changes in the worktree and call
 `gate_verdict` with your final decision.
 ```
 
-Before referencing a profile, inspect `~/.pi/agent/profiles/` and
-`.pi/profiles/` with filesystem tools such as `ls`. A project profile overrides
-a same-name global profile. A task or atom referencing a missing profile is a
-hard error.
+Before referencing a profile, call `list_task_profiles`. It reads
+`~/.pi/agent/profiles/` and `.pi/agent/profiles/`; a project profile overrides a
+same-name global profile. A task or atom referencing a missing profile is a hard
+error.
 
 ## Development
 
@@ -273,7 +273,7 @@ The extension is organized into domain-focused modules under `src/`:
 | ----------------- | ----------------------------------------------------------------------------------------------------- | --------------------------------------------------------------------------------------------------------------------------------------------------------- |
 | Entry & lifecycle | `index.ts`                                                                                            | Factory registering parent orchestration/history tools or child `gate_verdict`; seeds `merge-helper`; hard-kills children on shutdown.                    |
 | Types & constants | `types.ts`, `constants.ts`                                                                            | Domain model (statuses, limits, compose IR, cursor, audit events) and tunable defaults.                                                                   |
-| Tool surface      | `run-tasks.ts`, `task-history.ts`, `gate-verdict.ts`                                                  | Pool execution, ordered task response/session-history retrieval, and the terminating reviewer verdict tool.                                               |
+| Tool surface      | `run-tasks.ts`, `task-history.ts`, `profile-list.ts`, `gate-verdict.ts`                               | Pool execution, response history, task-profile discovery, and reviewer verdicts.                                                                          |
 | Scheduler         | `scheduler.ts`, `atoms.ts`, `cursor.ts`, `status.ts`, `dag.ts`, `gateloop.ts`, `retry.ts`, `pools.ts` | Dependency scheduling, compose-cursor advancement, status recompute, DAG resolution, gateLoop verdicts, two-level retry, and concurrency-pool accounting. |
 | Agent execution   | `agent-runner.ts`, `spawner.ts`, `profiles.ts`, `sessions.ts`                                         | Profile resolution, subprocess spawning, JSON-event parsing, and session-file move/rename for resume.                                                     |
 | Git & worktrees   | `git-op.ts`, `worktrees.ts`, `merge.ts`                                                               | Pool/task worktree creation, serial merge queue, and merge-helper conflict resolution.                                                                    |
