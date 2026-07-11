@@ -104,6 +104,7 @@ export function writeState(poolDir: string, pool: PoolState): void {
   const serialized: object = {
     id: pool.id,
     name: pool.name,
+    worktree: pool.worktree,
     branch: pool.branch,
     poolWorktree: pool.poolWorktree,
     baseBranch: pool.baseBranch,
@@ -164,6 +165,7 @@ export function readState(poolDir: string): PoolState | undefined {
     return {
       id: obj.id,
       name: obj.name as string,
+      worktree: obj.worktree !== false,
       branch: obj.branch as string,
       poolWorktree: obj.poolWorktree as string,
       baseBranch: obj.baseBranch as string,

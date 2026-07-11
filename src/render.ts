@@ -259,7 +259,11 @@ export function renderSummary(pool: PoolState): {
 
   // ── Pool identification ──
   lines.push(`Pool: ${pool.name}  (id: ${pool.id})`);
-  lines.push(`Pool branch: ${pool.branch}   (worktree: ${pool.poolWorktree})`);
+  if (pool.worktree === false) {
+    lines.push(`Execution: shared cwd (${pool.poolWorktree})`);
+  } else {
+    lines.push(`Pool branch: ${pool.branch}   (worktree: ${pool.poolWorktree})`);
+  }
 
   // ── Summary counts ──
   lines.push(
@@ -296,8 +300,10 @@ export function renderSummary(pool: PoolState): {
   lines.push(`Audit:    .pi/subagent-tasks/${pool.id}/audit.jsonl`);
 
   // ── Finalize instructions ──
-  lines.push(`Finalize: from your repo, e.g.  git merge --ff-only ${pool.branch}`);
-  lines.push(`                              | gh pr create --head ${pool.branch}`);
+  if (pool.worktree !== false) {
+    lines.push(`Finalize: from your repo, e.g.  git merge --ff-only ${pool.branch}`);
+    lines.push(`                              | gh pr create --head ${pool.branch}`);
+  }
 
   return {
     content: [{ type: "text", text: lines.join("\n") }],

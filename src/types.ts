@@ -105,7 +105,14 @@ export interface TaskSpec {
  * disambiguation is enforced at the tool layer.
  */
 export type RunTasksParams =
-  | { name: string; tasks: TaskSpec[]; limits?: Partial<LimitsConfig>; maxRetries?: number }
+  | {
+      name: string;
+      tasks: TaskSpec[];
+      limits?: Partial<LimitsConfig>;
+      maxRetries?: number;
+      /** Run tasks in isolated git worktrees (default true). */
+      worktree?: boolean;
+    }
   | { resume: string };
 
 // ── Compose execution cursor (§7.2) ──────────────────────────────────────────
@@ -296,6 +303,8 @@ export interface AuditEvent {
 export interface PoolState {
   id: string;
   name: string;
+  /** Whether this pool uses isolated git worktrees. Defaults true for legacy state. */
+  worktree?: boolean;
   branch: string;
   poolWorktree: string;
   baseBranch: string;

@@ -294,6 +294,33 @@ describe("run_tasks tool", () => {
     expect(profilesModule.seedMergeHelperProfile).toHaveBeenCalled();
   });
 
+  it("runs in the current cwd without git when worktree is false", async () => {
+    (worktreesModule.isGitRepo as ReturnType<typeof vi.fn>).mockResolvedValue(false);
+    const ctx = createMockContext();
+
+    await tool.execute(
+      "call-shared-cwd",
+      {
+        name: "Research Pool",
+        worktree: false,
+        tasks: [{ id: "research", prompt: "Research only" }],
+      },
+      undefined,
+      undefined,
+      ctx,
+    );
+
+    expect(worktreesModule.isGitRepo).not.toHaveBeenCalled();
+    expect(worktreesModule.canUseWorktrees).not.toHaveBeenCalled();
+    expect(worktreesModule.createPoolWorktree).not.toHaveBeenCalled();
+    expect(worktreesModule.ensureExcludeEntry).not.toHaveBeenCalled();
+    const writes = vi.mocked(stateModule.writeState).mock.calls;
+    const createdPool = writes[0]?.[1];
+    expect(createdPool?.worktree).toBe(false);
+    expect(createdPool?.poolWorktree).toBe(ctx.cwd);
+    expect(createdPool?.branch).toBe("");
+  });
+
   // ── Test 2: Duplicate pool id ───────────────────────────────────────
   it("throws when a pool with the same slugified id already exists", async () => {
     (stateModule.listPools as ReturnType<typeof vi.fn>).mockReturnValue(["my-pool"]);

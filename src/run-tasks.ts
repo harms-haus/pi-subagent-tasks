@@ -124,6 +124,11 @@ const runTasksParams = Type.Object(
     maxRetries: Type.Optional(
       Type.Number({ description: "Whole-task fresh-restart cap (default 2)" }),
     ),
+    worktree: Type.Optional(
+      Type.Boolean({
+        description: "Use isolated git worktrees and automatic merge (default true)",
+      }),
+    ),
     resume: Type.Optional(
       Type.String({ description: "Pool id to resume (mutually exclusive with name+tasks)" }),
     ),
@@ -213,9 +218,9 @@ export function createRunTasksTool(
     label: "Run Tasks",
     description:
       "Create and execute a pool of tasks with dependency resolution, " +
-      "concurrency limits, worktree isolation, and automatic merge. " +
-      "Each task runs as one or more pi-agent sessions in its own git worktree. " +
-      "Also supports resuming an existing pool by its pool id.",
+      "concurrency limits, optional worktree isolation, and automatic merge. " +
+      "Tasks use isolated git worktrees by default; set worktree:false to run all agents " +
+      "in the current working directory. Also supports resuming an existing pool by its pool id.",
     parameters: runTasksParams,
 
     async execute(
@@ -321,6 +326,7 @@ async function runPool(params: Record<string, unknown>, rpc: RunPoolContext) {
   const tasks = params.tasks as TaskSpec[] | undefined;
   const limits = params.limits as Partial<LimitsConfig> | undefined;
   const maxRetries = params.maxRetries as number | undefined;
+  const useWorktrees = params.worktree !== false;
   const resume = params.resume as string | undefined;
 
   // Resolve cwd.
@@ -360,17 +366,20 @@ async function runPool(params: Record<string, unknown>, rpc: RunPoolContext) {
       // surfacing stale-base worktrees for targeted recreation below.
       let staleWorktreeIds: string[] = [];
       const { missingWorktrees } = await reconcilePoolOnResume(pool, {
-        verifyWorktrees: async (p: PoolState) => {
-          const v = await verifyWorktrees(git, p, cwd);
-          staleWorktreeIds = v.stale;
-          return v.missing;
-        },
+        verifyWorktrees:
+          pool.worktree !== false
+            ? async (p: PoolState) => {
+                const v = await verifyWorktrees(git, p, cwd);
+                staleWorktreeIds = v.stale;
+                return v.missing;
+              }
+            : undefined,
       });
 
       const slug = slugify(pool.name);
 
       // Recreate missing task worktrees (externally deleted / corrupted).
-      const poolHead = await git.revParseHead(pool.poolWorktree);
+      const poolHead = pool.worktree !== false ? await git.revParseHead(pool.poolWorktree) : "";
       for (const taskId of missingWorktrees) {
         const task = pool.tasks.find((t) => t.id === taskId);
         if (task !== undefined) {
@@ -435,7 +444,11 @@ async function runPool(params: Record<string, unknown>, rpc: RunPoolContext) {
       // merge marking it done.
       for (const t of pool.tasks) {
         if (isComposeComplete(t.cursor) && t.status !== "done") {
-          if (t.worktreePath !== null) {
+          if (pool.worktree === false) {
+            // Shared-cwd pools have no merge phase: completed atoms mean the
+            // task itself completed before the prior process exited.
+            t.status = "done";
+          } else if (t.worktreePath !== null) {
             // Worktree still exists → merge is genuinely pending: set the
             // task to running and re-enqueue it so the merge worker drains
             // it (onAgentFinished-style merge-enqueue only fires on agent
@@ -493,11 +506,11 @@ async function runPool(params: Record<string, unknown>, rpc: RunPoolContext) {
         throw new Error(`Dependency cycle detected: ${cycle}`);
       }
 
-      // Check git repository and worktree support.
-      if (!(await isGitRepo(git, cwd))) {
-        throw new Error("Not a git repository — task pools require git worktrees.");
+      // Worktree mode requires git; shared-cwd mode also works outside a repo.
+      if (useWorktrees && !(await isGitRepo(git, cwd))) {
+        throw new Error("Not a git repository — worktree task pools require git.");
       }
-      if (!(await canUseWorktrees(git, cwd))) {
+      if (useWorktrees && !(await canUseWorktrees(git, cwd))) {
         throw new Error("Git worktrees are not supported in this repository or git version.");
       }
 
@@ -519,9 +532,9 @@ async function runPool(params: Record<string, unknown>, rpc: RunPoolContext) {
       };
       const mergedMaxRetries = maxRetries ?? DEFAULT_MAX_RETRIES;
 
-      const poolBranch = `${BRANCH_PREFIX}/${poolId}`;
-      const poolWtPath = join(poolDirPath, "worktrees", "pool");
-      const baseBranch = await git.revParseHead(cwd);
+      const poolBranch = useWorktrees ? `${BRANCH_PREFIX}/${poolId}` : "";
+      const poolWtPath = useWorktrees ? join(poolDirPath, "worktrees", "pool") : cwd;
+      const baseBranch = useWorktrees ? await git.revParseHead(cwd) : "";
 
       // Build task runtime objects.
       const downstreamCounts = computeDownstreamCount(resolved.assignedIds, resolved.idMap);
@@ -539,6 +552,7 @@ async function runPool(params: Record<string, unknown>, rpc: RunPoolContext) {
       pool = {
         id: poolId,
         name,
+        worktree: useWorktrees,
         branch: poolBranch,
         poolWorktree: poolWtPath,
         baseBranch,
@@ -563,15 +577,17 @@ async function runPool(params: Record<string, unknown>, rpc: RunPoolContext) {
       const createdWts: Array<{ path: string; branch: string }> = [];
 
       try {
-        // Create pool worktree.
-        const poolWt = await createPoolWorktree(git, cwd, poolId, poolId, baseBranch);
-        pool.poolWorktree = poolWt.path;
-        pool.branch = poolWt.branch;
-        createdWts.push(poolWt);
-        audit.log("worktree_created", { scope: "pool", path: poolWt.path });
+        if (useWorktrees) {
+          // Create pool worktree.
+          const poolWt = await createPoolWorktree(git, cwd, poolId, poolId, baseBranch);
+          pool.poolWorktree = poolWt.path;
+          pool.branch = poolWt.branch;
+          createdWts.push(poolWt);
+          audit.log("worktree_created", { scope: "pool", path: poolWt.path });
 
-        // Ensure .pi/subagent-tasks/ is excluded from tracking.
-        await ensureExcludeEntry(git, cwd);
+          // Ensure .pi/subagent-tasks/ is excluded from tracking.
+          await ensureExcludeEntry(git, cwd);
+        }
 
         // NOTE (H1 / D10 / §10.1): task worktrees are NOT created here.
         // They are created lazily on first start (when the task becomes
@@ -686,6 +702,14 @@ async function runPool(params: Record<string, unknown>, rpc: RunPoolContext) {
       },
       maxRetries: pool.maxRetries,
       onMergeEnqueue: (taskId: string) => {
+        if (pool.worktree === false) {
+          const task = pool.tasks.find((candidate) => candidate.id === taskId);
+          if (task) task.status = "done";
+          (audit as AuditLogger).log("task_done", { taskId });
+          writeState(poolDirPath, pool);
+          scheduler.mergeComplete(taskId);
+          return;
+        }
         mergeWorker.enqueue(taskId);
         // BUGFIX §14.1: call processNext after each enqueue so the merge
         // pipeline actually starts — without this the merge queue fills up
@@ -710,6 +734,13 @@ async function runPool(params: Record<string, unknown>, rpc: RunPoolContext) {
         };
       })(),
       onTaskRestart: async (task: TaskRuntime) => {
+        if (pool.worktree === false) {
+          task.worktreePath = cwd;
+          task.branch = null;
+          task.cursor = buildCursor(task.compose, task.id);
+          task.sessionFiles = [];
+          return;
+        }
         // BUGFIX §8.2 (L2 retry): remove the stale worktree + branch,
         // create a fresh one from the current pool HEAD, and reset the
         // compose cursor so the task starts from scratch.
@@ -732,6 +763,12 @@ async function runPool(params: Record<string, unknown>, rpc: RunPoolContext) {
         task.sessionFiles = [];
       },
       onEnsureWorktree: async (task: TaskRuntime) => {
+        if (pool.worktree === false) {
+          task.worktreePath = cwd;
+          task.branch = null;
+          writeState(poolDirPath, pool);
+          return;
+        }
         // H1 / D10 / §10.1: lazily create a task worktree on first start,
         // branched from the pool's CURRENT HEAD so dependent tasks see
         // their merged parents' code.

@@ -126,6 +126,7 @@ unless every atom in its compose tree specifies one.
 ```jsonc
 {
   "name": "release-feature", // required → slugified to pool id + branch
+  "worktree": true, // optional; default true. false → all tasks use caller cwd
   "tasks": [
     // required, static (fixed at creation)
     {
@@ -150,6 +151,11 @@ unless every atom in its compose tree specifies one.
 
 - `name` is slugified (kebab-case) to become the **pool id**, the git branch
   (`pi-subagent-task/<slug>`), and the on-disk directory name.
+- `worktree` defaults to `true`. Set it to `false` for shared-cwd execution:
+  no git repository is required, no branches/worktrees are created, and no
+  merge/finalization step occurs. All agents see the caller's current directory,
+  so use this for read-only research/planning or disjoint outputs—not concurrent
+  edits to the same files.
 - `dependsOn` is resolved against task `id`s and `title`s at creation. An
   unresolved reference is a hard error.
 - If a pool id already exists on disk and no `resume` is given, `run_tasks`

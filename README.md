@@ -10,9 +10,11 @@ ordered, dependent tasks, and the extension autonomously drives the entire pool
 to completion before returning a summary. Internally it:
 
 - **Spawns sub-agent processes** under named profiles, one or more per task.
-- **Isolates each task in its own git worktree** off a shared pool branch.
+- **Isolates each task in its own git worktree by default** off a shared pool branch.
 - **Merges finished work serially** back into the pool branch — fast-forward when
   possible, otherwise a `merge-helper` agent resolves conflicts.
+- **Supports shared-cwd execution** with `"worktree": false` for read-only research,
+  planning, or other pools that should operate directly in the caller's directory.
 - **Enforces concurrency limits** across three independent pools
   (total / provider / model), all AND-gated.
 - **Streams a live, tiered "board"** of task states inside the tool output
@@ -73,6 +75,21 @@ _after_ their parents merge, so they see the parents' code.
   "limits": { "total": 4 },
 }
 ```
+
+Worktrees are enabled by default. For a pool that should run directly in the
+current directory, opt out explicitly:
+
+```jsonc
+{
+  "name": "research-pool",
+  "worktree": false,
+  "tasks": [{ "id": "scan", "profile": "researcher", "prompt": "Inspect the codebase." }],
+}
+```
+
+Shared-cwd tasks do not create branches or merge results. They may run outside a
+git repository. Concurrent agents see and can modify the same files, so reserve
+this mode for read-only work or deliberately disjoint outputs.
 
 `name` is slugified (kebab-case) into the **pool id**, the git branch
 (`pi-subagent-task/<slug>`), and the on-disk directory. The tool blocks until the
